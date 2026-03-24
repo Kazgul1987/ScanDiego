@@ -246,7 +246,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Scan gestartet...")
 
         self.scan_thread = QThread(self)
-        self.scan_worker = ScannerWorker(self.db, drives)
+        self.scan_worker = ScannerWorker(self.db.db_path, drives)
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.started.connect(self.scan_worker.run)
 

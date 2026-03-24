@@ -19,9 +19,9 @@ class ScannerWorker(QObject):
     error = Signal(str)
     finished = Signal(dict)
 
-    def __init__(self, db: DatabaseManager, drives: list[DriveInfo]) -> None:
+    def __init__(self, db_path: Path, drives: list[DriveInfo]) -> None:
         super().__init__()
-        self.db = db
+        self.db_path = db_path
         self.drives = drives
         self._cancelled = False
         self._allowed_extensions = {".iso", ".nsp", ".xci", ".bin", ".cue", ".img"}
@@ -32,8 +32,11 @@ class ScannerWorker(QObject):
         processed = 0
         found = 0
         errors = 0
+        db: DatabaseManager | None = None
 
         try:
+            db = DatabaseManager(self.db_path)
+
             for drive in self.drives:
                 if self._cancelled:
                     break
@@ -81,7 +84,7 @@ class ScannerWorker(QObject):
                                 last_seen_date=scan_ts,
                                 is_missing=0,
                             )
-                            self.db.upsert_entry(media)
+                            db.upsert_entry(media)
                             found += 1
                         except OSError as exc:
                             errors += 1
@@ -92,9 +95,9 @@ class ScannerWorker(QObject):
                                 f"Scanne {drive.display_name}", processed, found
                             )
 
-                self.db.mark_missing_for_drive(drive.volume_serial, scan_ts)
+                db.mark_missing_for_drive(drive.volume_serial, scan_ts)
 
-            self.db.commit()
+            db.commit()
             self.finished.emit(
                 {
                     "cancelled": self._cancelled,
@@ -106,6 +109,9 @@ class ScannerWorker(QObject):
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Scan crashed")
             self.error.emit(str(exc))
+        finally:
+            if db is not None:
+                db.close()
 
     def cancel(self) -> None:
         self._cancelled = True
