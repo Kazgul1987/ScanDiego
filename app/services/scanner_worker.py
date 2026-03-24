@@ -115,13 +115,12 @@ class ScannerWorker(QObject):
         while stack:
             current = stack.pop()
             try:
-                with current.iterdir() as it:
-                    for child in it:
-                        if self._cancelled:
-                            return
-                        if child.is_dir():
-                            stack.append(child)
-                        elif child.is_file():
-                            yield child
+                for child in current.iterdir():
+                    if self._cancelled:
+                        return
+                    if child.is_dir():
+                        stack.append(child)
+                    elif child.is_file():
+                        yield child
             except (PermissionError, OSError) as exc:
                 LOGGER.warning("Ordner nicht lesbar: %s (%s)", current, exc)
