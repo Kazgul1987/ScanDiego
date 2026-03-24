@@ -12,6 +12,8 @@ Die Zuordnung erfolgt nicht nur per Laufwerksbuchstabe, sondern zusätzlich übe
 - Erkennung externer Laufwerke (Laufwerksbuchstabe, Label, Dateisystem, Volume Serial)
 - Rekursiver Scan in `Games` und `ROMs`
 - Erkennung von Dateitypen: `.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`
+- Optionaler Modus: Meldet Ordner mit `.rar`/`.zip`, wenn **keine** ROM/Image-Datei (`.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`) im selben Ordner liegt
+- Ausgabe im Archiv-Modus erfolgt auf **Ordnerebene** (keine Einzelauflistung von `.rar`/`.zip`)
 - UI bleibt responsiv durch Worker in eigenem `QThread`
 - Scan abbrechbar
 - SQLite-Datenbank lokal (`data/scandiego.db`)

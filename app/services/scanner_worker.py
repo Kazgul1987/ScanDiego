@@ -19,12 +19,19 @@ class ScannerWorker(QObject):
     error = Signal(str)
     finished = Signal(dict)
 
-    def __init__(self, db_path: Path, drives: list[DriveInfo]) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        drives: list[DriveInfo],
+        report_archive_only_dirs: bool = False,
+    ) -> None:
         super().__init__()
         self.db_path = db_path
         self.drives = drives
+        self.report_archive_only_dirs = report_archive_only_dirs
         self._cancelled = False
         self._allowed_extensions = {".iso", ".nsp", ".xci", ".bin", ".cue", ".img"}
+        self._archive_extensions = {".rar", ".zip"}
 
     @Slot()
     def run(self) -> None:
@@ -32,6 +39,8 @@ class ScannerWorker(QObject):
         processed = 0
         found = 0
         errors = 0
+        archive_only_dirs: list[str] = []
+        seen_archive_only_dirs: set[Path] = set()
         db: DatabaseManager | None = None
 
         try:
@@ -53,47 +62,85 @@ class ScannerWorker(QObject):
                         continue
 
                     category = "game" if root.name.lower() == "games" else "rom"
-                    for entry in self._iter_files(root):
+                    stack = [root]
+                    while stack:
                         if self._cancelled:
                             break
-                        processed += 1
 
-                        if entry.suffix.lower() not in self._allowed_extensions:
-                            if processed % 100 == 0:
-                                self.progress.emit(
-                                    f"Durchsuche: {root}", processed, found
-                                )
+                        current = stack.pop()
+                        try:
+                            children = list(current.iterdir())
+                        except (PermissionError, OSError) as exc:
+                            LOGGER.warning("Ordner nicht lesbar: %s (%s)", current, exc)
+                            errors += 1
                             continue
 
-                        try:
-                            stat = entry.stat()
-                            media = MediaEntry(
-                                id=None,
-                                category=category,
-                                title=clean_title_from_filename(entry.name),
-                                original_filename=entry.name,
-                                full_path=str(entry.resolve()),
-                                file_name=entry.name,
-                                file_extension=entry.suffix.lower(),
-                                file_size=stat.st_size,
-                                modified_time=ts_to_iso(stat.st_mtime),
-                                drive_letter=drive.letter,
-                                drive_label=drive.label,
-                                drive_id=drive.volume_serial,
-                                scan_date=scan_ts,
-                                last_seen_date=scan_ts,
-                                is_missing=0,
-                            )
-                            db.upsert_entry(media)
-                            found += 1
-                        except OSError as exc:
-                            errors += 1
-                            LOGGER.warning("Datei konnte nicht gelesen werden: %s (%s)", entry, exc)
+                        has_rom_or_image = False
+                        has_archive = False
 
-                        if processed % 25 == 0:
-                            self.progress.emit(
-                                f"Scanne {drive.display_name}", processed, found
-                            )
+                        for child in children:
+                            if self._cancelled:
+                                break
+                            if child.is_dir():
+                                stack.append(child)
+                                continue
+                            if not child.is_file():
+                                continue
+
+                            processed += 1
+                            suffix = child.suffix.lower()
+                            if suffix in self._allowed_extensions:
+                                has_rom_or_image = True
+                                try:
+                                    stat = child.stat()
+                                    media = MediaEntry(
+                                        id=None,
+                                        category=category,
+                                        title=clean_title_from_filename(child.name),
+                                        original_filename=child.name,
+                                        full_path=str(child.resolve()),
+                                        file_name=child.name,
+                                        file_extension=suffix,
+                                        file_size=stat.st_size,
+                                        modified_time=ts_to_iso(stat.st_mtime),
+                                        drive_letter=drive.letter,
+                                        drive_label=drive.label,
+                                        drive_id=drive.volume_serial,
+                                        scan_date=scan_ts,
+                                        last_seen_date=scan_ts,
+                                        is_missing=0,
+                                    )
+                                    db.upsert_entry(media)
+                                    found += 1
+                                except OSError as exc:
+                                    errors += 1
+                                    LOGGER.warning(
+                                        "Datei konnte nicht gelesen werden: %s (%s)",
+                                        child,
+                                        exc,
+                                    )
+                            elif suffix in self._archive_extensions:
+                                has_archive = True
+
+                            if processed % 25 == 0:
+                                self.progress.emit(
+                                    f"Scanne {drive.display_name}", processed, found
+                                )
+
+                        if (
+                            self.report_archive_only_dirs
+                            and has_archive
+                            and not has_rom_or_image
+                        ):
+                            resolved_dir = current.resolve()
+                            if resolved_dir not in seen_archive_only_dirs:
+                                seen_archive_only_dirs.add(resolved_dir)
+                                archive_only_dirs.append(str(resolved_dir))
+                                db.upsert_archive_only_dir(
+                                    drive_id=drive.volume_serial,
+                                    folder_path=str(resolved_dir),
+                                    scan_date=scan_ts,
+                                )
 
                 db.mark_missing_for_drive(drive.volume_serial, scan_ts)
 
@@ -104,6 +151,7 @@ class ScannerWorker(QObject):
                     "processed": processed,
                     "found": found,
                     "errors": errors,
+                    "archive_only_dirs": archive_only_dirs,
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -115,18 +163,3 @@ class ScannerWorker(QObject):
 
     def cancel(self) -> None:
         self._cancelled = True
-
-    def _iter_files(self, root: Path):
-        stack = [root]
-        while stack:
-            current = stack.pop()
-            try:
-                for child in current.iterdir():
-                    if self._cancelled:
-                        return
-                    if child.is_dir():
-                        stack.append(child)
-                    elif child.is_file():
-                        yield child
-            except (PermissionError, OSError) as exc:
-                LOGGER.warning("Ordner nicht lesbar: %s (%s)", current, exc)
