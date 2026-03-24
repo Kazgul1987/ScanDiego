@@ -81,10 +81,19 @@ class ScannerWorker(QObject):
                         for child in children:
                             if self._cancelled:
                                 break
-                            if child.is_dir():
-                                stack.append(child)
-                                continue
-                            if not child.is_file():
+                            try:
+                                if child.is_dir():
+                                    stack.append(child)
+                                    continue
+                                if not child.is_file():
+                                    continue
+                            except OSError as exc:
+                                errors += 1
+                                LOGGER.warning(
+                                    "Eintrag konnte nicht geprüft werden: %s (%s)",
+                                    child,
+                                    exc,
+                                )
                                 continue
 
                             processed += 1
