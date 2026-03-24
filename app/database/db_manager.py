@@ -49,6 +49,16 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_media_title ON media_entries(title);
             CREATE INDEX IF NOT EXISTS idx_media_drive_id ON media_entries(drive_id);
             CREATE INDEX IF NOT EXISTS idx_media_last_seen ON media_entries(last_seen_date);
+
+            CREATE TABLE IF NOT EXISTS archive_only_dirs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                drive_id TEXT NOT NULL,
+                folder_path TEXT NOT NULL,
+                scan_date TEXT NOT NULL,
+                UNIQUE(drive_id, folder_path)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_archive_only_drive_id ON archive_only_dirs(drive_id);
             """
         )
         self._conn.commit()
@@ -100,6 +110,21 @@ class DatabaseManager:
             """,
             (drive_id, scan_date),
         )
+
+    def upsert_archive_only_dir(self, drive_id: str, folder_path: str, scan_date: str) -> None:
+        try:
+            self._conn.execute(
+                """
+                INSERT INTO archive_only_dirs (drive_id, folder_path, scan_date)
+                VALUES (?, ?, ?)
+                ON CONFLICT(drive_id, folder_path)
+                DO UPDATE SET scan_date=excluded.scan_date
+                """,
+                (drive_id, folder_path, scan_date),
+            )
+        except sqlite3.Error as exc:
+            LOGGER.exception("Failed to upsert archive-only directory: %s", folder_path)
+            raise DatabaseError(str(exc)) from exc
 
     def commit(self) -> None:
         self._conn.commit()

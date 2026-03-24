@@ -9,6 +9,9 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Qt
 from PySide6.QtGui import QAction, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -91,6 +94,10 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.btn_scan_all)
         controls_layout.addWidget(self.btn_cancel_scan)
 
+        self.chk_archive_only_dirs = QCheckBox(
+            "Nur Ordner mit .rar/.zip ohne ISO/ROM melden"
+        )
+
         self.drive_table = QTableView()
         self.drive_model = QStandardItemModel(0, 4)
         self.drive_model.setHorizontalHeaderLabels(
@@ -107,6 +114,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
 
         drives_layout.addLayout(controls_layout)
+        drives_layout.addWidget(self.chk_archive_only_dirs)
         drives_layout.addWidget(self.drive_table)
         drives_layout.addWidget(self.progress)
         top_layout.addWidget(drives_box)
@@ -246,7 +254,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Scan gestartet...")
 
         self.scan_thread = QThread(self)
-        self.scan_worker = ScannerWorker(self.db.db_path, drives)
+        self.scan_worker = ScannerWorker(
+            self.db.db_path,
+            drives,
+            report_archive_only_dirs=self.chk_archive_only_dirs.isChecked(),
+        )
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.started.connect(self.scan_worker.run)
 
@@ -285,6 +297,10 @@ class MainWindow(QMainWindow):
         if stats.get("cancelled"):
             msg = "Scan abgebrochen. " + msg
         self.statusBar().showMessage(msg)
+
+        archive_only_dirs = stats.get("archive_only_dirs", [])
+        if archive_only_dirs:
+            self._show_archive_only_dirs_dialog(archive_only_dirs)
 
     def reload_db(self) -> None:
         try:
@@ -437,3 +453,32 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             LOGGER.exception("CSV export failed")
             QMessageBox.critical(self, "Export-Fehler", str(exc))
+
+    def _show_archive_only_dirs_dialog(self, archive_only_dirs: list[str]) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Ordnerhinweise: Nur Archive ohne ROM/Image")
+        dialog.resize(900, 500)
+
+        layout = QVBoxLayout(dialog)
+        description = QLabel(
+            "Folgende Ordner enthalten .rar/.zip, aber keine .iso/.nsp/.xci/.bin/.cue/.img:"
+        )
+        layout.addWidget(description)
+
+        table = QTableView(dialog)
+        model = QStandardItemModel(0, 1, table)
+        model.setHorizontalHeaderLabels(["Ordnerpfad"])
+        for folder_path in archive_only_dirs:
+            model.appendRow([QStandardItem(folder_path)])
+        table.setModel(model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        layout.addWidget(table, 1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
