@@ -30,12 +30,15 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QComboBox,
+    QListWidget,
+    QTabWidget,
 )
 
 from app.database.db_manager import DatabaseManager, DatabaseError
 from app.models.drive import DriveInfo
 from app.services.drive_service import DriveService
 from app.services.scanner_worker import ScannerWorker
+from app.services.hashing_service import HashingWorker
 from app.utils.formatting import human_size
 from app.utils.paths import get_database_path
 
@@ -55,6 +58,8 @@ class MainWindow(QMainWindow):
 
         self.scan_thread: QThread | None = None
         self.scan_worker: ScannerWorker | None = None
+        self.hash_thread: QThread | None = None
+        self.hash_worker: HashingWorker | None = None
 
         self._build_ui()
         self.refresh_drives()
@@ -66,6 +71,9 @@ class MainWindow(QMainWindow):
         if self.scan_thread and self.scan_thread.isRunning():
             self.scan_thread.quit()
             self.scan_thread.wait(2_000)
+        if self.hash_thread and self.hash_thread.isRunning():
+            self.hash_thread.quit()
+            self.hash_thread.wait(2_000)
         self.db.close()
         super().closeEvent(event)
 
@@ -122,12 +130,17 @@ class MainWindow(QMainWindow):
         # Bottom section
         bottom_widget = QWidget()
         bottom_layout = QVBoxLayout(bottom_widget)
+        self.library_tabs = QTabWidget()
+        library_page = QWidget()
+        library_layout = QVBoxLayout(library_page)
 
         filter_layout = QHBoxLayout()
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Suche nach Titel, Dateiname oder Pfad")
         self.drive_filter = QComboBox()
         self.drive_filter.addItem("Alle Festplatten", "")
+        self.platform_filter = QComboBox()
+        self.platform_filter.addItem("Alle Plattformen", "")
         self.btn_reload_db = QPushButton("Datenbank neu laden")
         self.btn_export = QPushButton("Export als CSV")
         self.btn_open_folder = QPushButton("Ordner öffnen")
@@ -136,16 +149,18 @@ class MainWindow(QMainWindow):
         filter_layout.addWidget(self.search_input, 1)
         filter_layout.addWidget(QLabel("Filter Festplatte:"))
         filter_layout.addWidget(self.drive_filter)
+        filter_layout.addWidget(self.platform_filter)
         filter_layout.addWidget(self.btn_reload_db)
         filter_layout.addWidget(self.btn_export)
         filter_layout.addWidget(self.btn_open_folder)
 
         self.games_table = QTableView()
-        self.games_model = QStandardItemModel(0, 8)
+        self.games_model = QStandardItemModel(0, 9)
         self.games_model.setHorizontalHeaderLabels(
             [
                 "Typ",
                 "Titel",
+                "Plattform",
                 "Dateiname",
                 "Festplatte",
                 "Laufwerk",
@@ -177,9 +192,28 @@ class MainWindow(QMainWindow):
         details_layout.addRow("Datei geändert:", self.detail_modified)
         details_layout.addRow("Status:", self.detail_missing)
 
-        bottom_layout.addLayout(filter_layout)
-        bottom_layout.addWidget(self.games_table, 1)
-        bottom_layout.addWidget(details_box)
+        library_layout.addLayout(filter_layout)
+        library_layout.addWidget(self.games_table, 1)
+        library_layout.addWidget(details_box)
+        self.library_tabs.addTab(library_page, "Bibliothek (Tabelle)")
+
+        grid_page = QWidget()
+        grid_layout = QVBoxLayout(grid_page)
+        grid_layout.addWidget(QLabel(
+            "Coveransicht ist vorbereitet. Bis Metadaten-Provider eingerichtet sind, "
+            "werden neutrale Platzhalter verwendet."
+        ))
+        self.cover_placeholders = QListWidget()
+        grid_layout.addWidget(self.cover_placeholders)
+        self.library_tabs.addTab(grid_page, "Coveransicht")
+
+        cleanup_page = QWidget()
+        cleanup_layout = QVBoxLayout(cleanup_page)
+        cleanup_layout.addWidget(QLabel("Kategorien anklicken, um die Bibliothek gezielt aufzuräumen:"))
+        self.cleanup_list = QListWidget()
+        cleanup_layout.addWidget(self.cleanup_list)
+        self.library_tabs.addTab(cleanup_page, "Aufräumen")
+        bottom_layout.addWidget(self.library_tabs)
 
         splitter.addWidget(top_widget)
         splitter.addWidget(bottom_widget)
@@ -202,6 +236,8 @@ class MainWindow(QMainWindow):
 
         self.search_input.textChanged.connect(self.reload_db)
         self.drive_filter.currentIndexChanged.connect(self.reload_db)
+        self.platform_filter.currentIndexChanged.connect(self.reload_db)
+        self.cleanup_list.itemClicked.connect(self._apply_cleanup_filter)
 
         self.games_table.selectionModel().selectionChanged.connect(self.update_details)
         self.games_table.doubleClicked.connect(self.open_selected_folder)
@@ -275,8 +311,12 @@ class MainWindow(QMainWindow):
             self.scan_worker.cancel()
         self.statusBar().showMessage("Scan-Abbruch angefordert...")
 
-    def on_scan_progress(self, message: str, processed: int, found: int) -> None:
-        self.statusBar().showMessage(f"{message} | Geprüft: {processed} | Treffer: {found}")
+    def on_scan_progress(self, folder: str, processed: int, found: int,
+                         warnings: int, elapsed: float, status: str) -> None:
+        self.statusBar().showMessage(
+            f"{status} | Ordner: {folder} | Geprüft: {processed} | Treffer: {found} | "
+            f"Warnungen: {warnings} | Laufzeit: {elapsed:.1f}s"
+        )
 
     def on_scan_error(self, message: str) -> None:
         QMessageBox.critical(self, "Scan-Fehler", f"Der Scan wurde abgebrochen:\n{message}")
@@ -306,7 +346,8 @@ class MainWindow(QMainWindow):
         try:
             search = self.search_input.text().strip()
             drive_filter = self.drive_filter.currentData() if self.drive_filter.count() else ""
-            rows = self.db.list_entries(search=search, drive_filter=drive_filter or "")
+            platform = self.platform_filter.currentData() if self.platform_filter.count() else ""
+            rows = self.db.list_entries(search=search, drive_filter=drive_filter or "", platform_filter=platform or "")
         except DatabaseError as exc:
             QMessageBox.critical(self, "DB-Fehler", str(exc))
             return
@@ -319,6 +360,7 @@ class MainWindow(QMainWindow):
             ui_row = [
                 QStandardItem(row["category"].upper()),
                 QStandardItem(row["title"] + status_suffix),
+                QStandardItem(row["platform"]),
                 QStandardItem(row["file_name"]),
                 QStandardItem(row["drive_label"]),
                 QStandardItem(row["drive_letter"]),
@@ -329,6 +371,11 @@ class MainWindow(QMainWindow):
             self.games_model.appendRow(ui_row)
 
         self._reload_drive_filter()
+        self._reload_platform_filter()
+        self._reload_cleanup()
+        self.cover_placeholders.clear()
+        for row in self.current_rows:
+            self.cover_placeholders.addItem(f"▧  {row['title']}\n    {row['platform']}")
         self.statusBar().showMessage(f"{len(self.current_rows)} Einträge geladen.")
 
     def _reload_drive_filter(self) -> None:
@@ -345,6 +392,38 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.drive_filter.setCurrentIndex(idx)
         self.drive_filter.blockSignals(False)
+
+    def _reload_platform_filter(self) -> None:
+        previous = self.platform_filter.currentData()
+        platforms = sorted({row["platform"] for row in self.current_rows})
+        self.platform_filter.blockSignals(True)
+        self.platform_filter.clear()
+        self.platform_filter.addItem("Alle Plattformen", "")
+        for platform in platforms:
+            self.platform_filter.addItem(platform, platform)
+        index = self.platform_filter.findData(previous)
+        if index >= 0:
+            self.platform_filter.setCurrentIndex(index)
+        self.platform_filter.blockSignals(False)
+
+    def _reload_cleanup(self) -> None:
+        self.cleanup_list.clear()
+        for label, count in self.db.cleanup_counts().items():
+            self.cleanup_list.addItem(f"{count}  {label}")
+
+    def _apply_cleanup_filter(self, item) -> None:
+        label = item.text()
+        if "Unbekannte Plattformen" in label:
+            index = self.platform_filter.findData("Unknown")
+            if index >= 0:
+                self.platform_filter.setCurrentIndex(index)
+            self.library_tabs.setCurrentIndex(0)
+        elif "Fehlende Dateien" in label:
+            self.search_input.setText("")
+            QMessageBox.information(self, "Aufräumen", "Fehlende Dateien sind in der Tabelle mit '(fehlt)' markiert.")
+            self.library_tabs.setCurrentIndex(0)
+        else:
+            QMessageBox.information(self, "Aufräumen", "Die Kategorie wird aktuell als sichere Analyseübersicht angezeigt; Dateien werden niemals automatisch verändert.")
 
     def update_details(self) -> None:
         idx = self.games_table.currentIndex()
@@ -397,11 +476,52 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         act_open = QAction("Ordner öffnen", self)
         act_copy = QAction("Pfad kopieren", self)
+        act_hash = QAction("SHA-256 berechnen", self)
         act_open.triggered.connect(self.open_selected_folder)
         act_copy.triggered.connect(self.copy_selected_path)
+        act_hash.triggered.connect(self.hash_selected_file)
         menu.addAction(act_open)
         menu.addAction(act_copy)
+        menu.addAction(act_hash)
         menu.exec(self.games_table.viewport().mapToGlobal(pos))
+
+    def hash_selected_file(self) -> None:
+        row = self._selected_row_data()
+        if row is None or not row.get("media_file_id"):
+            return
+        if self.hash_thread and self.hash_thread.isRunning():
+            QMessageBox.information(self, "Hashing", "Eine Hashberechnung läuft bereits.")
+            return
+        if not Path(row["full_path"]).is_file():
+            QMessageBox.warning(self, "Hashing", "Die Datei ist nicht erreichbar.")
+            return
+        self.hash_thread = QThread(self)
+        self.hash_worker = HashingWorker(row["media_file_id"], row["full_path"])
+        self.hash_worker.moveToThread(self.hash_thread)
+        self.hash_thread.started.connect(self.hash_worker.run)
+        self.hash_worker.progress.connect(lambda percent: self.statusBar().showMessage(f"SHA-256: {percent}%"))
+        self.hash_worker.completed.connect(self._on_hash_completed)
+        self.hash_worker.failed.connect(self._on_hash_failed)
+        self.hash_worker.completed.connect(self.hash_thread.quit)
+        self.hash_worker.failed.connect(self.hash_thread.quit)
+        self.hash_thread.finished.connect(self.hash_thread.deleteLater)
+        self.hash_thread.finished.connect(self._clear_hash_worker)
+        self.hash_thread.start()
+
+    def _on_hash_completed(self, media_file_id: int, digest: str, hash_type: str) -> None:
+        try:
+            self.db.save_hash(media_file_id, digest, hash_type)
+            self.statusBar().showMessage(f"SHA-256 gespeichert: {digest[:16]}…")
+            self.reload_db()
+        except DatabaseError as exc:
+            QMessageBox.critical(self, "Hashing", str(exc))
+
+    def _on_hash_failed(self, _media_file_id: int, message: str) -> None:
+        QMessageBox.critical(self, "Hashing fehlgeschlagen", message)
+
+    def _clear_hash_worker(self) -> None:
+        self.hash_worker = None
+        self.hash_thread = None
 
     def export_csv(self) -> None:
         target, _ = QFileDialog.getSaveFileName(

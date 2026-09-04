@@ -20,3 +20,8 @@ class MediaEntry:
     scan_date: str
     last_seen_date: str
     is_missing: int
+    platform: str = "Unknown"
+    platform_overridden: int = 0
+    file_hash: str | None = None
+    hash_type: str | None = None
+    hash_calculated_at: str | None = None

@@ -1,67 +1,30 @@
-# ScanDiego
+# ScanDiego 0.5.0
 
-ScanDiego ist ein portables Windows-Desktop-Tool (PySide6 + SQLite), das externe Laufwerke auf Spiele-Images und ROMs scannt:
+ScanDiego ist ein lokaler Game-Collection-Manager für Windows (Python, PySide6 und SQLite). Die Anwendung erkennt externe Datenträger anhand ihrer **Volume Serial Number**, scannt deren Verzeichnisse `Games` und `ROMs` im Hintergrund und bewahrt den ursprünglichen Dateinamen neben einem lesbaren Titel auf.
 
-- **`<Laufwerk>\Games`** → Kategorie `game`
-- **`<Laufwerk>\ROMs`** → Kategorie `rom`
+## Funktionen
 
-Die Zuordnung erfolgt nicht nur per Laufwerksbuchstabe, sondern zusätzlich über die **Volume Serial Number** (Drive-ID).
+- Bestehende Tabellenansicht mit Suche, Laufwerks-/Plattformfilter, Details und CSV-Export.
+- Bibliotheks-Tabs für Tabelle und vorbereitete Coveransicht mit Platzhaltern.
+- **Aufräumen** zeigt Archive, mögliche/bestätigte Dubletten, fehlende Dateien, unbekannte Plattformen/Formate und Spiele ohne Metadaten. Es werden keine Dateien automatisch gelöscht oder verschoben.
+- Abbrechbarer `QThread`-Scan mit aktuellem Ordner, geprüften Dateien, Treffern, Warnungen, Laufzeit und Status.
+- Scan-Läufe haben `running`, `completed`, `cancelled`, `failed` oder `completed_with_warnings`. Nur ein vollständig fehlerfreier `completed`-Scan darf ältere Dateien als fehlend markieren. Schon ein nicht lesbarer Unterordner erzeugt Warnstatus und unterdrückt die Missing-Erkennung für das Laufwerk.
+- Batch-Upserts (250 Einträge pro Transaktion) und iteratorbasiertes Traversieren großer Ordner.
+- Optionale SHA-256-Infrastruktur als Worker-Thread; Hashing erfolgt niemals automatisch. Identische gespeicherte SHA-256-Werte gelten als bestätigte Dublette.
 
-## Features (MVP)
+## Plattformen und Formate
 
-- Erkennung externer Laufwerke (Laufwerksbuchstabe, Label, Dateisystem, Volume Serial)
-- Rekursiver Scan in `Games` und `ROMs`
-- Erkennung von Dateitypen: `.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`
-- Optionaler Modus: Meldet Ordner mit `.rar`/`.zip`, wenn **keine** ROM/Image-Datei (`.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`) im selben Ordner liegt
-- Ausgabe im Archiv-Modus erfolgt auf **Ordnerebene** (keine Einzelauflistung von `.rar`/`.zip`)
-- UI bleibt responsiv durch Worker in eigenem `QThread`
-- Scan abbrechbar
-- SQLite-Datenbank lokal (`data/scandiego.db`)
-- Upsert statt Duplikaten (`UNIQUE(drive_id, full_path)`)
-- `last_seen_date`-Aktualisierung + Markierung fehlender Dateien (`is_missing`)
-- Suche, Festplattenfilter, Detailansicht
-- Kontextmenü/Komfort: Ordner öffnen, Pfad kopieren
-- CSV-Export
-- Logging in `logs/app.log`
+Die zentrale Plattformdefinition umfasst PC, PlayStation 1–5, PSP, PS Vita, Xbox/360/One/Series, NES, SNES, Nintendo 64, GameCube, Wii/Wii U, Switch, Game Boy/Color/Advance, DS/3DS, Sega Mega Drive/Genesis, Saturn, Dreamcast und Unknown. Die Erkennung priorisiert Ordner-Aliase (`PS2`, `PlayStation2`, `Super Famicom` usw.) und verwendet danach eindeutige Endungen.
 
----
+Unterstützt werden `.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`, `.chd`, `.cso`, `.rvz`, `.wbfs`, `.wia`, `.gcz`, `.nsz`, `.xcz`, `.3ds`, `.cia`, `.gba`, `.gbc`, `.gb`, `.nds`, `.n64`, `.z64`, `.v64`, `.sfc`, `.smc`, `.gen` und `.md`. Archivhinweise erkennen `.rar`, `.zip` und `.7z`.
 
-## Projektstruktur
+## Datenbank und Migration
 
-```text
-ScanDiego/
-├─ main.py
-├─ build.bat
-├─ requirements.txt
-├─ README.md
-└─ app/
-   ├─ ui/
-   │  └─ main_window.py
-   ├─ services/
-   │  ├─ drive_service.py
-   │  └─ scanner_worker.py
-   ├─ database/
-   │  └─ db_manager.py
-   ├─ models/
-   │  ├─ drive.py
-   │  └─ game_entry.py
-   └─ utils/
-      ├─ paths.py
-      ├─ logging_setup.py
-      ├─ formatting.py
-      └─ date_utils.py
-```
+Die portable Datenbank liegt bei einem Quellstart in `data/scandiego.db`, beim gebauten Programm relativ zur EXE. Alte `media_entries` bleiben erhalten und werden beim ersten Start transaktional um additive Spalten ergänzt. Bestehende Zeilen werden in die normalisierten Tabellen `games`, `media_files` und `drives` übernommen; `scan_runs` protokolliert Scanstatus und Statistiken. Die bisherige Tabelle bleibt als kompatible Projektion für UI, Filter und Export bestehen.
 
----
+## Installation und Start
 
-## Entwickler-Start
-
-### 1) Voraussetzungen
-
-- Windows 10/11
-- Python 3.11+ (empfohlen)
-
-### 2) Virtuelle Umgebung + Start
+Voraussetzungen: Windows 10/11 und Python 3.11 oder neuer.
 
 ```bat
 py -3.11 -m venv .venv
@@ -70,60 +33,15 @@ pip install -r requirements.txt
 python main.py
 ```
 
----
-
-## Portable Build (ohne Installer)
-
-### Schnell über `build.bat`
+Testabhängigkeiten und Tests:
 
 ```bat
-build.bat
+pip install -r requirements-dev.txt
+python -m pytest
 ```
 
-Ergebnis:
+Ein portabler Build wird mit `build.bat` erzeugt. Logs rotieren unter `logs/app.log`; protokolliert werden App-Start, Migrationen, Scans, Lesefehler, Datenbankfehler, Hashing und Dublettenanalyse.
 
-- Portabler Ordner in `dist\ScanDiego\`
-- Start via `ScanDiego.exe`
-- DB/Logs werden relativ zur EXE im Ordner `data/` und `logs/` geführt
+## Metadaten
 
-### Manuell mit PyInstaller
-
-```bat
-pyinstaller --noconfirm --clean --windowed --name ScanDiego --add-data "data;data" --add-data "logs;logs" main.py
-```
-
----
-
-## Architektur (kurz)
-
-- **UI-Schicht (`app/ui`)**
-  - Fensteraufbau, Interaktionen, Tabellen, Filter, Export
-- **Service-Schicht (`app/services`)**
-  - Laufwerkserkennung (Windows API)
-  - Scanlogik mit Rekursion und Abbruchsteuerung
-- **Datenbank-Schicht (`app/database`)**
-  - Schema, Upsert, Filterabfragen, Missing-Markierung
-- **Modelle (`app/models`)**
-  - Typisierte Datencontainer
-- **Utils (`app/utils`)**
-  - Pfade, Logging, Datum/Zeit, Titel-/Größenformatierung
-
-Die UI bleibt stabil, weil der eigentliche Dateiscan in einem Worker-Thread läuft.
-
----
-
-## Wichtige pragmatische Entscheidungen
-
-1. **Externe Laufwerke**: Für MVP werden alle `DRIVE_FIXED` und `DRIVE_REMOVABLE` Laufwerke außer Systemlaufwerk als „extern relevant“ behandelt.
-2. **Drive-Zuordnung**: Primär über `volume_serial` (Drive-ID), zusätzlich Anzeige von Laufwerksbuchstabe und Label.
-3. **Scan-Root**: Es werden nur `Games` und `ROMs` gescannt (wie gefordert), nicht das gesamte Laufwerk.
-4. **Titelermittlung**: Standardmäßig Dateiname ohne Endung, `_` → Leerzeichen, doppelte Leerzeichen reduziert.
-5. **Fehlende Dateien**: Nach Scan eines Laufwerks werden ältere Einträge desselben `drive_id` als `is_missing=1` markiert.
-
----
-
-## Hinweise
-
-- Beim Trennen eines Laufwerks während des Scans werden Lesefehler geloggt; die Anwendung bleibt lauffähig.
-- Für sehr große Datenträger kann ein erster Vollscan dauern; Fortschritt wird in der Statusleiste aktualisiert.
-- Erweiterungen (z. B. Hashing, zusätzliche Dateiendungen, bessere Tag-Bereinigung) sind vorbereitet.
+`games` enthält bereits Felder für Jahr, Publisher, Entwickler, Region, Edition, Cover und `metadata_source`. Externe Provider wie IGDB oder SteamGridDB sind bewusst noch nicht angebunden; die Felder und Coveransicht bilden die Erweiterungsstelle.
