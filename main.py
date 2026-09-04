@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import logging
 
 from PySide6.QtWidgets import QApplication
 
@@ -12,6 +13,7 @@ from app.utils.logging_setup import setup_logging
 def main() -> int:
     ensure_runtime_dirs()
     setup_logging()
+    logging.getLogger(__name__).info("ScanDiego wird gestartet")
 
     app = QApplication(sys.argv)
     app.setApplicationName("ScanDiego")

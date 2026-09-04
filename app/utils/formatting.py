@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import re
-from pathlib import Path
+from app.services.title_normalization_service import TitleNormalizationService
 
 
 def clean_title_from_filename(filename: str) -> str:
-    stem = Path(filename).stem
-    title = stem.replace("_", " ")
-    title = re.sub(r"\s+", " ", title).strip()
-    return title
+    """Compatibility wrapper for callers of the original helper."""
+    return TitleNormalizationService().normalize(filename)
 
 
 def human_size(size_bytes: int) -> str:
