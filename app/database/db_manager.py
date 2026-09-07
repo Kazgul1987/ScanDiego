@@ -535,15 +535,47 @@ class DatabaseManager:
         LOGGER.info("Manuelle Zuordnung / Content-Lock: media=%s parent=%s", media_file_id, parent_game_id)
 
     def remove_manual_content_parent(self, media_file_id: int) -> None:
-        row = self._conn.execute("SELECT 1 FROM media_files WHERE id=?", (media_file_id,)).fetchone()
+        row = self._conn.execute("""SELECT mf.*,g.platform,me.title AS local_title
+            FROM media_files mf JOIN games g ON g.id=mf.game_id
+            LEFT JOIN media_entries me ON me.media_file_id=mf.id WHERE mf.id=?""",
+            (media_file_id,)).fetchone()
         if not row:
             raise DatabaseError("MediaFile nicht gefunden")
+        content_type = MediaContentType(row["content_type"])
+        local_title = (row["local_title"] or "").strip()
+        title = (row["content_title"] or local_title or Path(row["file_name"]).stem).strip()
+        neutral_title = f"{title} ({content_type.value.upper()})"
+        # Prefer a retained original holding Game. Otherwise a deterministic
+        # supplemental title avoids duplicate records on repeated removal.
+        neutral = self._conn.execute("""SELECT g.id FROM games g WHERE g.id<>? AND g.platform=?
+            AND g.title IN (?,?)
+            AND NOT EXISTS (SELECT 1 FROM media_files base WHERE base.game_id=g.id
+                AND base.content_type='base_game')
+            ORDER BY CASE WHEN g.title=? THEN 0 ELSE 1 END LIMIT 1""",
+            (row["game_id"], row["platform"], local_title, neutral_title, local_title)).fetchone()
         with self._conn:
-            self._conn.execute("""UPDATE media_files SET content_parent_game_id=NULL,
-                content_locked=0 WHERE id=?""", (media_file_id,))
-            self._conn.execute("""UPDATE media_entries SET content_parent_game_id=NULL,
-                content_locked=0 WHERE media_file_id=?""", (media_file_id,))
-        LOGGER.info("Manuelle Content-Zuordnung entfernt: media=%s", media_file_id)
+            if neutral:
+                neutral_game_id = neutral["id"]
+            else:
+                timestamp = now_iso()
+                candidate = neutral_title
+                suffix = 2
+                while self._conn.execute("SELECT 1 FROM games WHERE title=? AND platform=?",
+                                         (candidate, row["platform"])).fetchone():
+                    candidate = f"{neutral_title} {suffix}"
+                    suffix += 1
+                cursor = self._conn.execute("""INSERT INTO games
+                    (title,sort_title,platform,created_at,updated_at) VALUES(?,?,?,?,?)""",
+                    (candidate, candidate.casefold(), row["platform"], timestamp, timestamp))
+                neutral_game_id = cursor.lastrowid
+            self._conn.execute("""UPDATE media_files SET game_id=?,content_parent_game_id=NULL,
+                content_detection_method='manual',content_detection_confidence=1,content_locked=1 WHERE id=?""",
+                (neutral_game_id, media_file_id))
+            self._conn.execute("""UPDATE media_entries SET game_id=?,content_parent_game_id=NULL,
+                content_detection_method='manual',content_detection_confidence=1,content_locked=1 WHERE media_file_id=?""",
+                (neutral_game_id, media_file_id))
+        LOGGER.info("Manuelle Content-Zuordnung dauerhaft entfernt: media=%s game=%s",
+                    media_file_id, neutral_game_id)
 
     def manual_parent_candidates(self, media_file_id: int, search: str = "") -> list[sqlite3.Row]:
         media = self._conn.execute("""SELECT mf.*,g.platform FROM media_files mf
