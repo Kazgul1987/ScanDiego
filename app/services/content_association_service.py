@@ -27,8 +27,13 @@ class ContentAssociationService:
                   ) -> ContentAssociationResult:
         if current and current.get("content_locked"):
             LOGGER.info("Content-Lock respektiert: media=%s", current.get("id"))
-            return ContentAssociationResult(current.get("content_parent_game_id") or current.get("game_id"), 1.0, "manual")
+            return ContentAssociationResult(current.get("content_parent_game_id"), 1.0, "manual")
         candidates = [g for g in games if str(g.get("platform", "Unknown")) == platform]
+        # A supplemental-only Game is a holding record, not a parent candidate.
+        # The current Game is still eligible once it actually contains a base file;
+        # in the grouped model both game_id and parent_game_id then intentionally
+        # identify that real base Game.
+        candidates = [g for g in candidates if bool(g.get("has_base", True))]
         technical = []
         if detection.base_content_id:
             wanted = detection.base_content_id.casefold()
@@ -38,10 +43,6 @@ class ContentAssociationService:
             return ContentAssociationResult(int(technical[0]["id"]), .99, "technical_id")
         title = self.titles.normalize(detection.title or "").casefold()
         by_title = [g for g in candidates if self.titles.normalize(str(g.get("title", ""))).casefold() == title]
-        # Prefer candidates with a known base file. This also prevents attachment
-        # to an old standalone DLC record with the same derived title.
-        with_base = [g for g in by_title if g.get("has_base", True)]
-        by_title = with_base or by_title
         if len(by_title) == 1:
             LOGGER.info("Parent-Game gefunden (Titel/Plattform): %s", by_title[0]["id"])
             return ContentAssociationResult(int(by_title[0]["id"]), .9, "title_platform")

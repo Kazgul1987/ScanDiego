@@ -50,10 +50,11 @@ def test_legacy_dlc_game_is_safely_consolidated_and_metadata_queue_filters(tmp_p
 
 def test_manual_content_lock_survives_automatic_analysis(tmp_path):
     db = DatabaseManager(tmp_path / "db.sqlite")
+    db.upsert_entry(media("/base.nsp", "Base", MediaContentType.BASE_GAME))
     db.upsert_entry(media("/locked.nsp")); db.commit()
-    media_id = db._conn.execute("SELECT id FROM media_files").fetchone()[0]
-    game_id = db._conn.execute("SELECT id FROM games").fetchone()[0]
+    media_id = db._conn.execute("SELECT id FROM media_files WHERE file_name='locked.nsp'").fetchone()[0]
+    game_id = db._conn.execute("SELECT id FROM games WHERE title='Base'").fetchone()[0]
     db.set_manual_content(media_id, MediaContentType.DLC, game_id, "Manual")
     db.apply_content_detection(media_id, ContentDetectionResult(MediaContentType.UPDATE, "Changed", confidence=.9))
-    row = db._conn.execute("SELECT content_type,content_title,content_locked FROM media_files").fetchone()
+    row = db._conn.execute("SELECT content_type,content_title,content_locked FROM media_files WHERE id=?", (media_id,)).fetchone()
     assert tuple(row) == ("dlc", "Manual", 1)
