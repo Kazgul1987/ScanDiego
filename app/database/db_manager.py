@@ -14,7 +14,7 @@ from app.services.duplicate_detection_service import DuplicateDetectionService, 
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class DatabaseError(RuntimeError):
@@ -125,6 +125,8 @@ class DatabaseManager:
                 "external_game_id TEXT", "external_platform_id TEXT", "canonical_title TEXT",
                 "release_date TEXT", "description TEXT", "metadata_last_updated TEXT",
                 "metadata_match_score REAL", "metadata_match_method TEXT", "cover_source TEXT",
+                "metadata_locked INTEGER NOT NULL DEFAULT 0", "artwork_source TEXT",
+                "artwork_external_game_id TEXT", "artwork_status TEXT NOT NULL DEFAULT 'not_requested'",
             ):
                 self._add_column("games", definition)
             self._conn.executescript("""
@@ -323,7 +325,8 @@ class DatabaseManager:
             games.canonical_title, games.release_year AS metadata_release_year, games.publisher,
             games.developer, games.description, games.cover_path, games.cover_source,
             games.metadata_source, games.metadata_status, games.metadata_match_score,
-            games.metadata_match_method, games.external_game_id
+            games.metadata_match_method, games.external_game_id, games.metadata_locked,
+            games.artwork_source, games.artwork_external_game_id, games.artwork_status
             FROM media_entries LEFT JOIN games ON games.id=media_entries.game_id
             {where} ORDER BY media_entries.title COLLATE NOCASE""", params).fetchall())
         except sqlite3.Error as exc:
@@ -339,7 +342,9 @@ class DatabaseManager:
             ids = list(game_ids)
             if not ids: return 0
             where = f"id IN ({','.join('?' for _ in ids)})"; params.extend(ids)
-            if not force: where += " AND metadata_status!='manual'"
+            # A durable lock, not the transient queue status, protects user decisions.
+            if not force: where += " AND metadata_locked=0"
+            else: where += " AND (metadata_locked=0 OR external_game_id IS NOT NULL)"
         cursor = self._conn.execute(f"UPDATE games SET metadata_status=? WHERE {where}", [MetadataStatus.QUEUED, *params])
         self._conn.commit(); return cursor.rowcount
 
@@ -364,16 +369,17 @@ class DatabaseManager:
 
     def apply_metadata(self, game_id: int, game: ExternalGame, provider: str, score: float,
                        method: str, status: MetadataStatus = MetadataStatus.MATCHED) -> None:
-        current = self._conn.execute("SELECT metadata_status FROM games WHERE id=?", (game_id,)).fetchone()
+        current = self._conn.execute("SELECT metadata_locked FROM games WHERE id=?", (game_id,)).fetchone()
         if not current: raise DatabaseError("Spiel nicht gefunden")
-        if current[0] == MetadataStatus.MANUAL and method != "manual": return
+        if current[0] and method not in {"manual", "refresh"}: return
         timestamp = now_iso()
         with self._conn:
             self._conn.execute("""UPDATE games SET canonical_title=?,external_game_id=?,external_platform_id=?,
                 release_date=?,release_year=?,publisher=?,developer=?,description=?,region=?,metadata_source=?,
-                metadata_status=?,metadata_last_updated=?,metadata_match_score=?,metadata_match_method=?,updated_at=? WHERE id=?""",
+                metadata_status=?,metadata_last_updated=?,metadata_match_score=?,metadata_match_method=?,
+                metadata_locked=CASE WHEN ?='manual' THEN 1 ELSE metadata_locked END,updated_at=? WHERE id=?""",
                 (game.title, game.external_id, game.external_platform_id, game.release_date, game.release_year,
-                 game.publisher, game.developer, game.description, game.region, provider, status, timestamp, score, method, timestamp, game_id))
+                 game.publisher, game.developer, game.description, game.region, provider, status, timestamp, score, method, method, timestamp, game_id))
             self._conn.execute("DELETE FROM metadata_match_candidates WHERE game_id=?", (game_id,))
 
     def apply_candidate_manually(self, game_id: int, external: ExternalGame, provider: str, score: float) -> None:
@@ -383,10 +389,36 @@ class DatabaseManager:
     def set_cover(self, game_id: int, path: str | None, source: str | None) -> None:
         self._conn.execute("UPDATE games SET cover_path=?,cover_source=?,updated_at=? WHERE id=?", (path, source, now_iso(), game_id)); self._conn.commit()
 
+    def remove_cover(self, game_id: int) -> str | None:
+        row = self._conn.execute("SELECT cover_path FROM games WHERE id=?", (game_id,)).fetchone()
+        self._conn.execute("UPDATE games SET cover_path=NULL,cover_source=NULL,artwork_status='not_requested' WHERE id=?", (game_id,)); self._conn.commit()
+        return row[0] if row else None
+
+    def enqueue_covers(self, game_ids: Iterable[int] | None = None, force: bool = False) -> int:
+        params: list[Any] = []
+        where = "external_game_id IS NOT NULL AND COALESCE(cover_path,'')='' AND artwork_status NOT IN ('queued','searching')"
+        if game_ids is not None:
+            ids = list(game_ids)
+            if not ids: return 0
+            where += f" AND id IN ({','.join('?' for _ in ids)})"; params.extend(ids)
+        if force: where = where.replace(" AND COALESCE(cover_path,'')=''", "")
+        cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued' WHERE {where}", params)
+        self._conn.commit(); return cursor.rowcount
+
+    def queued_covers(self):
+        return list(self._conn.execute("SELECT * FROM games WHERE artwork_status='queued' ORDER BY id"))
+
+    def set_artwork_result(self, game_id: int, status: str, path: str | None = None,
+                           source: str | None = None, external_id: str | None = None) -> None:
+        self._conn.execute("""UPDATE games SET artwork_status=?,cover_path=COALESCE(?,cover_path),
+            cover_source=COALESCE(?,cover_source),artwork_source=COALESCE(?,artwork_source),
+            artwork_external_game_id=COALESCE(?,artwork_external_game_id),updated_at=? WHERE id=?""",
+            (status, path, source, source, external_id, now_iso(), game_id)); self._conn.commit()
+
     def reset_metadata(self, game_id: int) -> None:
         with self._conn:
             self._conn.execute("""UPDATE games SET metadata_status='not_requested',metadata_source=NULL,external_game_id=NULL,
                 external_platform_id=NULL,canonical_title=NULL,release_date=NULL,release_year=NULL,publisher=NULL,
                 developer=NULL,description=NULL,region=NULL,metadata_last_updated=NULL,metadata_match_score=NULL,
-                metadata_match_method=NULL WHERE id=?""", (game_id,))
+                metadata_match_method=NULL,metadata_locked=0 WHERE id=?""", (game_id,))
             self._conn.execute("DELETE FROM metadata_match_candidates WHERE game_id=?", (game_id,))

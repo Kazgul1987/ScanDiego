@@ -16,5 +16,5 @@ class FakeArtworkProvider(ArtworkProvider):
     name = "fake-artwork"
     def __init__(self, body: bytes = b"\x89PNG\r\n\x1a\ncontent", content_type="image/png"):
         self.body, self.content_type, self.download_calls = body, content_type, 0
-    def search_cover(self, game: ExternalGame) -> list[CoverResult]: return [CoverResult("fake://cover")]
+    def search_cover(self, game: ExternalGame) -> list[CoverResult]: return [CoverResult("fake://cover", external_game_id=game.external_id)]
     def download_cover(self, cover: CoverResult) -> tuple[bytes, str]: self.download_calls += 1; return self.body, self.content_type

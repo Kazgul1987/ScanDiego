@@ -12,7 +12,7 @@ COMPANION_FILE_EXTENSIONS = frozenset({
     ".log", ".ini", ".cfg",
 })
 SCAN_BATCH_SIZE = 250
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 
 
 def is_unknown_media_candidate(extension: str) -> bool:

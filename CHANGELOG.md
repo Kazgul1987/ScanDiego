@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 – 2026-09-07
+
+- Dauerhafter Manual-Match-Schutz (`metadata_locked`) und Status `no_match`.
+- Separater Cover-Workflow mit gespeichertem SteamGridDB-Match und sicherem Scoring.
+- Match-Prüfung, Match-Änderung und freie manuelle Suche im Worker-Thread.
+- Secrets im OS Credential Manager einschließlich sicherer Klartextmigration.
+- Provider-Factory, vereinheitlichte Health-Ergebnisse und zentrale `incomplete`-Regel.
+- Vollständige IGDB-Veröffentlichungsdaten und Schema-v5-Migration.
+
 ## 0.7.0 – 2026-09-07
 
 - Austauschbare IGDB-/SteamGridDB-Provider, zentraler HTTP-Client und sichere Laufzeitkonfiguration ohne eingebettete Schlüssel.

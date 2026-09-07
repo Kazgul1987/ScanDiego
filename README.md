@@ -61,6 +61,26 @@ Der Matcher normalisiert Unicode und Interpunktion. Der Titel trägt 75 Punkte, 
 
 Cover werden validiert (JPEG, PNG oder WebP), zunächst temporär geschrieben und atomar unter `data/covers/<provider>_<external-id>_<game-id>.<ext>` ersetzt. Vorhandene Dateien werden nicht erneut geladen. Coverfehler verändern einen erfolgreichen Metadatenmatch nicht. Ohne Netzwerk oder Credentials bleiben Scan, Cleanup, Tabelle, bestehende Cover und die gesamte lokale Bibliothek verfügbar; lediglich Queue-Einträge erhalten einen verständlichen Fehlerstatus. HTTP-Anfragen haben Timeouts, begrenzte Retries und Frequenz, beachten `Retry-After` bei 429 und erzeugen keine parallele Anfrageflut.
 
+## Sichere Matches und Provider (0.8)
+
+Manuell bestätigte Matches erhalten einen dauerhaften `metadata_locked`-Schutz. Automatische
+Läufe überspringen sie; ein ausdrückliches Aktualisieren verwendet die bereits bekannte externe
+ID und führt keinen Fuzzy-Rematch aus. **Match prüfen** und **Match ändern** zeigen gespeicherte
+Kandidaten und erlauben eine nicht blockierende Suche mit eigenem Suchtext. „Kein passender
+Treffer“ setzt `no_match`, sodass automatische Läufe die Entscheidung respektieren.
+
+Cover laufen in einer separaten Cover-Queue. SteamGridDB-Treffer werden bewertet, unsichere
+Treffer nicht übernommen und die bestätigte Artwork-ID für spätere Aktualisierungen gespeichert.
+Cover gehören nicht zur Metadaten-Vollständigkeit: `incomplete` bedeutet, dass trotz Match weniger
+als drei der Angaben Titel, Veröffentlichungsdatum/-jahr, Publisher und Developer vorhanden sind.
+
+IGDB-Secret und SteamGridDB-Key werden über `keyring` im Credential Manager gespeichert;
+Umgebungsvariablen haben Vorrang. Alte Klartextwerte werden nur nach erfolgreicher Übernahme
+entfernt. Ohne verfügbares Keyring-Backend bleibt die App offline nutzbar und speichert kein Secret
+im Klartext. Die Provider-Auswahl im Einstellungsdialog wird von den Workern über eine Factory
+verwendet. Metadata- und Cover-Queues sind getrennt sichtbar und können durch ihre Worker
+abgebrochen werden; MetadataQueueService unterstützt außerdem Pause und Fortsetzen.
+
 ### Datenschutz
 
 Bei einer Suche werden ausschließlich normalisierter **Spieltitel** und **Plattform** benötigt. Lokale Pfade, Dateinamen, Laufwerksbuchstaben, Volume-Seriennummern und andere Bibliotheksdaten werden nicht an Provider übertragen.

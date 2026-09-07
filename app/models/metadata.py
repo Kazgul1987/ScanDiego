@@ -14,6 +14,7 @@ class MetadataStatus(StrEnum):
     INCOMPLETE = "incomplete"
     FAILED = "failed"
     MANUAL = "manual"
+    NO_MATCH = "no_match"
 
 
 @dataclass(slots=True)
@@ -37,3 +38,12 @@ class CoverResult:
     kind: str = "poster"
     width: int | None = None
     height: int | None = None
+    external_game_id: str | None = None
+
+
+@dataclass(slots=True)
+class ProviderHealthResult:
+    success: bool
+    status: str
+    message: str
+    latency_ms: float | None = None

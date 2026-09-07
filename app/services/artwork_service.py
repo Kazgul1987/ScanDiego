@@ -18,11 +18,19 @@ class ArtworkService:
         self.provider, self.cache_dir = provider, cache_dir or get_covers_dir()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-    def fetch(self, game_id: int, game: ExternalGame, force=False) -> Path | None:
-        prefix = f"{self.provider.name}_{game.external_id}_{game_id}"
+    def fetch(self, game_id: int, game: ExternalGame, force=False,
+              artwork_external_id: str | None = None) -> Path | None:
+        result = self.fetch_with_match(game_id, game, force, artwork_external_id)
+        return result[0] if result else None
+
+    def fetch_with_match(self, game_id: int, game: ExternalGame, force=False,
+                         artwork_external_id: str | None = None) -> tuple[Path, str | None] | None:
+        match_id = artwork_external_id or game.external_id
+        prefix = f"{self.provider.name}_{match_id}_{game_id}"
         existing = next(iter(self.cache_dir.glob(prefix + ".*")), None)
-        if existing and not force: return existing
-        covers = self.provider.search_cover(game)
+        if existing and not force: return existing, artwork_external_id
+        direct = getattr(self.provider, "covers_for_game", None)
+        covers = direct(artwork_external_id) if artwork_external_id and direct else self.provider.search_cover(game)
         if not covers: return None
         body, content_type = self.provider.download_cover(covers[0]); content_type = content_type.split(";", 1)[0].lower()
         if content_type not in CONTENT_TYPES or not body or not body.startswith(MAGIC[content_type]): raise InvalidArtworkError("Ungültige Bildantwort")
@@ -35,7 +43,7 @@ class ArtworkService:
         finally:
             if os.path.exists(temp_name): os.unlink(temp_name)
         LOGGER.info("Cover gespeichert: %s", target.name)
-        return target
+        return target, covers[0].external_game_id or artwork_external_id
 
     def remove(self, path: str | None) -> None:
         if path:

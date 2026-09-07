@@ -35,7 +35,7 @@ class HttpClient:
         self._last_request = 0.0
 
     def request(self, url: str, *, method="GET", headers=None, data: bytes | None = None) -> HttpResponse:
-        headers = {"User-Agent": "ScanDiego/0.7", **(headers or {})}
+        headers = {"User-Agent": "ScanDiego/0.8", **(headers or {})}
         for attempt in range(self.retries + 1):
             time.sleep(max(0, self.min_interval - (time.monotonic() - self._last_request)))
             try:
