@@ -459,7 +459,8 @@ class MainWindow(QMainWindow):
 
     def _apply_cleanup_filter(self, item) -> None:
         label = item.data(Qt.ItemDataRole.UserRole)
-        CleanupDetailsDialog(label, self.db.cleanup_details(label), self).exec()
+        CleanupDetailsDialog(label, self.db.cleanup_details(label), self, self.db).exec()
+        self._reload_cleanup()
 
     def update_details(self) -> None:
         idx = self.games_table.currentIndex()

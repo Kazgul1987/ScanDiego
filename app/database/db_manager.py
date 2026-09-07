@@ -165,6 +165,7 @@ class DatabaseManager:
             # Interrupted work is safe to reconstruct on next startup.
             self._conn.execute("UPDATE games SET metadata_status=? WHERE metadata_status=?", (MetadataStatus.QUEUED, MetadataStatus.SEARCHING))
             self._backfill_normalized_tables()
+            self._repair_invalid_self_parents()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         LOGGER.info("Datenbankschema Version %s ist bereit", SCHEMA_VERSION)
 
@@ -173,6 +174,27 @@ class DatabaseManager:
         for row in rows:
             game_id, media_id = self._upsert_normalized(dict(row))
             self._conn.execute("UPDATE media_entries SET game_id=?, media_file_id=? WHERE id=?", (game_id, media_id, row["id"]))
+
+    def _repair_invalid_self_parents(self) -> int:
+        """Clear supplemental self-links when the Game has no genuine base file.
+
+        A lock protects user classification, but cannot make an invalid relation
+        valid; therefore the relation is cleared while the lock itself is retained.
+        """
+        predicate = """content_type IN ('update','dlc','addon')
+            AND content_parent_game_id=game_id
+            AND NOT EXISTS (SELECT 1 FROM media_files base
+                WHERE base.game_id=media_files.game_id AND base.content_type='base_game')"""
+        ids = [row[0] for row in self._conn.execute(
+            f"SELECT id FROM media_files WHERE {predicate}").fetchall()]
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            self._conn.execute(
+                f"UPDATE media_files SET content_parent_game_id=NULL WHERE id IN ({placeholders})", ids)
+            self._conn.execute(
+                f"UPDATE media_entries SET content_parent_game_id=NULL WHERE media_file_id IN ({placeholders})", ids)
+            LOGGER.warning("%s ungültige Content-Self-Parents repariert", len(ids))
+        return len(ids)
 
     def close(self) -> None:
         self._conn.close()
@@ -195,12 +217,14 @@ class DatabaseManager:
             with self._conn:
                 for entry in entries:
                     self._upsert_entry_no_commit(entry)
+                self.reconcile_content_associations()
         except sqlite3.Error as exc:
             LOGGER.exception("Batch-Upsert fehlgeschlagen")
             raise DatabaseError(str(exc)) from exc
 
     def upsert_entry(self, entry: MediaEntry) -> None:
         self._upsert_entry_no_commit(entry)
+        self.reconcile_content_associations()
 
     def _upsert_entry_no_commit(self, entry: MediaEntry) -> None:
         payload: dict[str, Any] = asdict(entry); payload.pop("id", None)
@@ -216,10 +240,14 @@ class DatabaseManager:
                          "base_content_id", "content_detection_method", "content_detection_confidence",
                          "content_parent_game_id", "content_region", "content_locked"):
                 payload[name] = existing[name]
+        elif payload.get("content_type") in {
+                MediaContentType.UPDATE, MediaContentType.DLC, MediaContentType.ADDON}:
+            # Never trust a caller-supplied parent during an upsert. The dedicated
+            # association pass below is the sole automatic authority.
+            payload["content_parent_game_id"] = None
         game_id, media_id = self._upsert_normalized(payload)
-        if payload.get("content_type") in {MediaContentType.UPDATE, MediaContentType.DLC, MediaContentType.ADDON}:
-            payload["content_parent_game_id"] = game_id
-            self._conn.execute("UPDATE media_files SET content_parent_game_id=? WHERE id=? AND content_locked=0", (game_id, media_id))
+        # Parent selection is intentionally not part of persistence. It is done by
+        # ContentAssociationService in the reconciliation pass below.
         payload.update(game_id=game_id, media_file_id=media_id)
         self._conn.execute("""
             INSERT INTO media_entries (category,title,original_filename,full_path,file_name,file_extension,
@@ -351,7 +379,7 @@ class DatabaseManager:
 
     @staticmethod
     def _content_cleanup_query(predicate: str) -> str:
-        return f"""SELECT mf.file_name,g.platform,mf.content_type,mf.content_title AS possible_base_title,
+        return f"""SELECT mf.id AS media_file_id,mf.file_name,g.platform,mf.content_type,mf.content_title AS possible_base_title,
             g.title AS current_game,pg.title AS suggested_parent_game,mf.content_detection_confidence,
             mf.content_detection_method,mf.full_path FROM media_files mf JOIN games g ON g.id=mf.game_id
             LEFT JOIN games pg ON pg.id=mf.content_parent_game_id WHERE {predicate} ORDER BY mf.file_name"""
@@ -420,6 +448,18 @@ class DatabaseManager:
             (SELECT b.base_content_id FROM media_files b WHERE b.game_id=g.id AND b.content_type='base_game' AND b.base_content_id IS NOT NULL LIMIT 1) AS base_content_id
             FROM games g""")]
 
+    def reconcile_content_associations(self) -> None:
+        """Re-run unlocked supplemental associations after newly seen base files."""
+        rows = self._conn.execute("""SELECT id,content_type,content_title,content_version,
+            content_id,base_content_id,content_detection_method,content_detection_confidence,
+            content_region FROM media_files WHERE content_locked=0
+            AND content_type IN ('update','dlc','addon') ORDER BY id""").fetchall()
+        for row in rows:
+            self.apply_content_detection(row["id"], ContentDetectionResult(
+                MediaContentType(row["content_type"]), row["content_title"], row["content_version"],
+                row["content_id"], row["base_content_id"], row["content_region"],
+                row["content_detection_confidence"], ContentDetectionMethod(row["content_detection_method"])))
+
     def apply_content_detection(self, media_file_id: int, result: ContentDetectionResult) -> None:
         row = self._conn.execute("""SELECT mf.*,g.platform,g.title AS game_title
             FROM media_files mf JOIN games g ON g.id=mf.game_id WHERE mf.id=?""", (media_file_id,)).fetchone()
@@ -428,6 +468,12 @@ class DatabaseManager:
             return
         association = ContentAssociationService().associate(result, row["platform"], self._association_games(), dict(row))
         parent = association.parent_game_id
+        if parent == row["game_id"]:
+            has_base = self._conn.execute("""SELECT 1 FROM media_files WHERE game_id=?
+                AND content_type='base_game' AND id<>? LIMIT 1""", (parent, media_file_id)).fetchone()
+            if not has_base:
+                LOGGER.warning("Self-Parent ohne Base-Datei verworfen: media=%s game=%s", media_file_id, parent)
+                parent = None
         # Base files remain on their current Game. Supplemental content moves only
         # after a unique conservative association.
         new_game = row["game_id"] if result.content_type in {MediaContentType.BASE_GAME, MediaContentType.DEMO, MediaContentType.UNKNOWN} or parent is None else parent
@@ -463,6 +509,11 @@ class DatabaseManager:
                            parent_game_id: int | None, title: str | None = None) -> None:
         row = self._conn.execute("SELECT game_id FROM media_files WHERE id=?", (media_file_id,)).fetchone()
         if not row: raise DatabaseError("MediaFile nicht gefunden")
+        if parent_game_id == row["game_id"]:
+            has_base = self._conn.execute("""SELECT 1 FROM media_files WHERE game_id=?
+                AND content_type='base_game' AND id<>?""", (parent_game_id, media_file_id)).fetchone()
+            if not has_base:
+                raise DatabaseError("Ein Zusatzinhalt ohne Base-Datei kann nicht sein eigener Parent sein")
         game_id = parent_game_id or row["game_id"]
         with self._conn:
             self._conn.execute("""UPDATE media_files SET game_id=?,content_type=?,content_title=?,
@@ -472,6 +523,33 @@ class DatabaseManager:
                 content_parent_game_id=?,content_detection_method='manual',content_detection_confidence=1,content_locked=1 WHERE media_file_id=?""",
                 (game_id, content_type, title, parent_game_id, media_file_id))
         LOGGER.info("Manuelle Zuordnung / Content-Lock: media=%s parent=%s", media_file_id, parent_game_id)
+
+    def remove_manual_content_parent(self, media_file_id: int) -> None:
+        row = self._conn.execute("SELECT 1 FROM media_files WHERE id=?", (media_file_id,)).fetchone()
+        if not row:
+            raise DatabaseError("MediaFile nicht gefunden")
+        with self._conn:
+            self._conn.execute("""UPDATE media_files SET content_parent_game_id=NULL,
+                content_locked=0 WHERE id=?""", (media_file_id,))
+            self._conn.execute("""UPDATE media_entries SET content_parent_game_id=NULL,
+                content_locked=0 WHERE media_file_id=?""", (media_file_id,))
+        LOGGER.info("Manuelle Content-Zuordnung entfernt: media=%s", media_file_id)
+
+    def manual_parent_candidates(self, media_file_id: int, search: str = "") -> list[sqlite3.Row]:
+        media = self._conn.execute("""SELECT mf.*,g.platform FROM media_files mf
+            JOIN games g ON g.id=mf.game_id WHERE mf.id=?""", (media_file_id,)).fetchone()
+        if not media:
+            return []
+        token = f"%{search.strip()}%"
+        return list(self._conn.execute("""SELECT g.id,g.title,g.platform,
+            EXISTS(SELECT 1 FROM media_files b WHERE b.game_id=g.id AND b.content_type='base_game') AS has_base
+            FROM games g WHERE EXISTS(SELECT 1 FROM media_files b WHERE b.game_id=g.id
+                AND b.content_type='base_game')
+                AND ((?='' AND g.platform=?) OR (?<>'' AND g.title LIKE ?))
+            ORDER BY CASE WHEN g.platform=? THEN 0 ELSE 1 END,
+                CASE WHEN lower(g.title)=lower(?) THEN 0 ELSE 1 END,g.title COLLATE NOCASE""",
+            (search.strip(), media["platform"], search.strip(), token,
+             media["platform"], media["content_title"] or "")))
 
     def enqueue_metadata(self, game_ids: Iterable[int] | None = None, force: bool = False) -> int:
         params: list[Any] = []

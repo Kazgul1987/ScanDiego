@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1 – 2026-09-07
+
+- Self-Parents für DLCs, Add-ons und Updates verhindert und bestehende ungültige Beziehungen beim Start repariert.
+- Deterministische, reihenfolgeunabhängige Parent-Zuordnung zentral über den `ContentAssociationService`; Titelkandidaten benötigen eine Base-Datei.
+- Manuelle Hauptspiel-Zuordnung und Lösen der Zuordnung aus problematischen Cleanup-Ansichten ergänzt.
+- Switch Title IDs werden auch als isolierte 16-stellige Hex-Tokens ohne eckige Klammern erkannt.
+
 ## 0.9.0 – 2026-09-07
 
 - Additives Schema v6 mit zentralen Content-Typen, technischen IDs, Parent-Relation, Confidence und manuellem Lock.

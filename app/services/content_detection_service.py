@@ -13,6 +13,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ContentDetectionService:
+    # Hex token boundaries deliberately reject a match embedded in a longer hash.
+    _SWITCH_TITLE_ID = re.compile(r"(?<![0-9A-F])(?:\[([0-9A-F]{16})\]|([0-9A-F]{16}))(?![0-9A-F])", re.I)
     _UPDATE = re.compile(r"\b(?:title\s+update|update|patch|version|ver)\b|(?:^|[\s._-])v\d+(?:\.\d+)+\b", re.I)
     _DLC = re.compile(r"\b(?:dlc|add-?on|expansion|season\s+pass|fighter\s+pass|costume\s+pack|character\s+pack|bonus\s+content|expansion\s+pass|story\s+expansion)\b", re.I)
     _DEMO = re.compile(r"\b(?:demo|trial|prototype|beta)\b", re.I)
@@ -38,9 +40,9 @@ class ContentDetectionService:
                     ContentDetectionMethod.CONTAINER_METADATA, tuple(warnings))
             LOGGER.warning("Container metadata unavailable für %s; Fallback auf Filename", path)
         stem = path.stem.replace("_", " ").strip()
-        title_id_match = re.search(r"\[([0-9A-F]{16})\]", stem, re.I)
+        title_id_match = self._SWITCH_TITLE_ID.search(stem)
         if title_id_match:
-            content_id = title_id_match.group(1).upper()
+            content_id = (title_id_match.group(1) or title_id_match.group(2)).upper()
             content_type, base_id = SwitchContentDetectionService.classify_title_id(content_id)
             clean_stem = (stem[:title_id_match.start()] + stem[title_id_match.end():]).strip()
             title = self.base_titles.derive(clean_stem, content_type)

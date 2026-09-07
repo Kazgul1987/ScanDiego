@@ -29,5 +29,6 @@ def test_exact_technical_id_wins_and_manual_lock_is_preserved():
     service = ContentAssociationService()
     assert service.associate(detection(base_id="0100A"), "Switch", games).parent_game_id == 1
     locked = service.associate(detection(base_id="0100A"), "Switch", games,
-                               {"id": 4, "game_id": 2, "content_locked": 1})
+                               {"id": 4, "game_id": 2, "content_parent_game_id": 2,
+                                "content_locked": 1})
     assert locked.parent_game_id == 2 and locked.reason == "manual"

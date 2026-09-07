@@ -1,4 +1,4 @@
-# ScanDiego 0.9.0
+# ScanDiego 0.9.1
 
 ScanDiego ist ein lokaler Game-Collection-Manager für Windows (Python, PySide6 und SQLite). Die Anwendung erkennt externe Datenträger anhand ihrer **Volume Serial Number**, scannt deren Verzeichnisse `Games` und `ROMs` im Hintergrund und bewahrt den ursprünglichen Dateinamen neben einem lesbaren Titel auf.
 
@@ -39,14 +39,18 @@ bleibt. Explizite, wortbegrenzte Marker erkennen Updates, Versionen, DLC-/Expans
 Eine getrennte Basistitel-Logik entfernt nur erkannte Content-Suffixe und verändert weder Dateien noch
 die allgemeine Titel-Normalisierung. Titel und Plattform müssen eindeutig übereinstimmen; eine exakte
 technische Base-ID hat Vorrang. Unsichere oder elternlose Funde bleiben unzugeordnet und erscheinen im
-Aufräumen. Manuelle Zuordnungen werden dauerhaft gesperrt.
+Aufräumen. Dort kann ein Hauptspiel aus plattform- und titelpriorisierten Base-Kandidaten gesucht und
+manuell zugeordnet werden. Manuelle Zuordnungen werden dauerhaft gesperrt und können gezielt wieder
+gelöst werden, ohne den erkannten Content-Typ zu löschen.
 
 Der austauschbare Switch-Parser unterstützt `.nsp`, `.xci`, `.nsz` und `.xcz`, liest höchstens 64 KiB
 und verarbeitet ausschließlich offen vorliegende Metadaten. Zusätzlich werden eindeutige 16-stellige
 Title IDs in Dateinamen verwendet. Die zentral getestete Beziehung wertet Offset `000` als Base,
 `800` als Update und den folgenden `0x1000`-Block mit nicht-null Content-Index als DLC. Normale verschlüsselte NCA-Metadaten
 werden **nicht** entschlüsselt: es gibt keine eingebetteten Keys, Key-Downloads, Key-Erzeugung oder
-DRM-Umgehung. ScanDiego konfiguriert derzeit bewusst auch kein Keyfile; ohne Keys funktionieren
+DRM-Umgehung. Isolierte 16-stellige Hex-IDs werden mit oder ohne eckige Klammern erkannt; längere
+Hex-Tokens und Hashfragmente werden nicht teilgematcht. ScanDiego konfiguriert derzeit bewusst auch
+kein Keyfile; ohne Keys funktionieren
 Dateinamen-Fallback, Zuordnung, Bibliothek, Queues und Cleanup vollständig. Ein nicht lesbarer
 Container erzeugt nur eine Warnung und stoppt weder Scan noch Analyse.
 
@@ -54,8 +58,11 @@ Die Cover-Bibliothek bleibt auf Game-Ebene und zeigt kleine Update-/DLC-Zähler.
 Hauptspiele, Updates, DLC/Add-ons und sonstigen Content. Die Metadaten-Queue ignoriert reine,
 zugeordnete Zusatz-Game-Datensätze. Alte eindeutige DLC-/Update-Games werden nur dann entfernt, wenn
 ihre Datei sicher umgehängt wurde, der Datensatz leer und ungelockt ist und keine relevanten
-Metadaten/Cover trägt. Cleanup ist stets read-only und ergänzt elternlose DLCs/Updates, unbekannte
-Typen, mehrere Base-Dateien, unsichere Zuordnungen und manuelle Prüfung.
+Metadaten/Cover trägt. Cleanup löscht oder verschiebt niemals Dateien und ergänzt elternlose
+DLCs/Updates, unbekannte Typen, mehrere Base-Dateien, unsichere Zuordnungen und manuelle Prüfung.
+Beim Start entfernt ein Maintenance-Pass ungültige Self-Parents aus Games ohne Base-Datei. Ein
+vorhandener manueller Lock bleibt dabei erhalten; nur die technisch ungültige Relation wird geleert.
+Ungesperrte Inhalte werden beim Scan erneut über den zentralen `ContentAssociationService` geprüft.
 
 ## Installation und Start
 
