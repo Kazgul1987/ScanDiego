@@ -45,7 +45,13 @@ from app.utils.formatting import human_size
 from app.utils.paths import get_database_path
 from app.settings import MetadataSettings
 from app.services.metadata_worker import MetadataWorker
+from app.services.cover_worker import CoverWorker
 from app.ui.metadata_settings_dialog import MetadataSettingsDialog
+from app.ui.match_review_dialog import MatchReviewDialog
+from app.providers.factory import create_metadata_provider, create_artwork_provider
+from app.services.game_matching_service import GameMatchingService
+from app.services.match_review_service import MatchReviewService
+from app.services.artwork_service import ArtworkService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +69,7 @@ class MainWindow(QMainWindow):
         self.metadata_settings = MetadataSettings.load()
         self.metadata_thread: QThread | None = None
         self.metadata_worker: MetadataWorker | None = None
+        self.cover_thread = None; self.cover_worker = None
 
         self.scan_thread: QThread | None = None
         self.scan_worker: ScannerWorker | None = None
@@ -212,7 +219,8 @@ class MainWindow(QMainWindow):
         self.btn_metadata_all = QPushButton("Metadaten für alle fehlenden Spiele abrufen")
         self.btn_covers_all = QPushButton("Cover für gematchte Spiele laden")
         self.btn_metadata_settings = QPushButton("Metadaten & Cover einstellen")
-        metadata_controls.addWidget(self.btn_metadata_all); metadata_controls.addWidget(self.btn_covers_all); metadata_controls.addWidget(self.btn_metadata_settings)
+        self.btn_metadata_pause = QPushButton("Pause"); self.btn_metadata_cancel = QPushButton("Abbrechen")
+        metadata_controls.addWidget(self.btn_metadata_all); metadata_controls.addWidget(self.btn_covers_all); metadata_controls.addWidget(self.btn_metadata_settings); metadata_controls.addWidget(self.btn_metadata_pause); metadata_controls.addWidget(self.btn_metadata_cancel)
         grid_layout.addLayout(metadata_controls)
         self.cover_placeholders = QListWidget()
         grid_layout.addWidget(self.cover_placeholders)
@@ -247,6 +255,8 @@ class MainWindow(QMainWindow):
         self.btn_metadata_all.clicked.connect(self.enqueue_all_metadata)
         self.btn_covers_all.clicked.connect(self.enqueue_missing_covers)
         self.btn_metadata_settings.clicked.connect(self.open_metadata_settings)
+        self.btn_metadata_pause.clicked.connect(self.toggle_metadata_pause)
+        self.btn_metadata_cancel.clicked.connect(lambda: self.metadata_worker and self.metadata_worker.cancel())
 
         self.search_input.textChanged.connect(self.reload_db)
         self.drive_filter.currentIndexChanged.connect(self.reload_db)
@@ -500,14 +510,31 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             search = menu.addAction("Metadaten suchen")
             refresh = menu.addAction("Metadaten aktualisieren")
+            review = menu.addAction("Match prüfen")
+            change = menu.addAction("Match ändern")
+            cover = menu.addAction("Cover laden / aktualisieren")
+            remove_cover = menu.addAction("Cover entfernen")
             reset = menu.addAction("Metadaten zurücksetzen")
             search.triggered.connect(lambda: self.enqueue_game(row["game_id"], False))
             refresh.triggered.connect(lambda: self.enqueue_game(row["game_id"], True))
+            review.setEnabled(row.get("metadata_status") == "ambiguous")
+            review.triggered.connect(lambda: self.open_match_review(row["game_id"]))
+            change.triggered.connect(lambda: self.open_match_review(row["game_id"]))
+            cover.triggered.connect(lambda: (self.db.enqueue_covers([row["game_id"]], True), self._start_cover_queue()))
+            remove_cover.triggered.connect(lambda: self._remove_cover(row["game_id"]))
             reset.triggered.connect(lambda: (self.db.reset_metadata(row["game_id"]), self.reload_db()))
         menu.exec(self.games_table.viewport().mapToGlobal(pos))
 
     def open_metadata_settings(self) -> None:
         MetadataSettingsDialog(self.metadata_settings, self).exec()
+
+    def open_match_review(self, game_id):
+        game=self.db._conn.execute("SELECT * FROM games WHERE id=?",(game_id,)).fetchone()
+        service=MatchReviewService(self.db,create_metadata_provider(self.metadata_settings),GameMatchingService(self.metadata_settings.automatic_threshold,self.metadata_settings.ambiguous_threshold))
+        if MatchReviewDialog(game,service,self).exec(): self.reload_db()
+
+    def _remove_cover(self, game_id):
+        ArtworkService(create_artwork_provider(self.metadata_settings)).remove(self.db.remove_cover(game_id)); self.reload_db()
 
     def enqueue_game(self, game_id: int, force=False) -> None:
         if self.db.enqueue_metadata([game_id], force): self._start_metadata_queue()
@@ -517,15 +544,29 @@ class MainWindow(QMainWindow):
         if count: self._start_metadata_queue()
 
     def enqueue_missing_covers(self) -> None:
-        ids = [r[0] for r in self.db._conn.execute("SELECT id FROM games WHERE metadata_status IN ('matched','manual') AND COALESCE(cover_path,'')='' ")]
-        count = self.db.enqueue_metadata(ids, True); self.statusBar().showMessage(f"Cover: {count} Spiele eingereiht")
-        if count: self._start_metadata_queue()
+        count = self.db.enqueue_covers(); self.statusBar().showMessage(f"Cover: {count} Spiele eingereiht")
+        if count: self._start_cover_queue()
+
+    def _start_cover_queue(self):
+        if self.cover_thread and self.cover_thread.isRunning(): return
+        self.cover_thread=QThread(self); self.cover_worker=CoverWorker(self.db.db_path,self.metadata_settings); self.cover_worker.moveToThread(self.cover_thread)
+        self.cover_thread.started.connect(self.cover_worker.run); self.cover_worker.finished.connect(self._cover_finished); self.cover_worker.failed.connect(self._metadata_failed)
+        self.cover_worker.finished.connect(self.cover_thread.quit); self.cover_worker.failed.connect(self.cover_thread.quit); self.cover_thread.start()
+
+    def _cover_finished(self, stats):
+        self.statusBar().showMessage(f"Cover: {stats['processed']} verarbeitet · {stats['ambiguous']} unklar · {stats['failed']} Fehler")
+        self.cover_worker=None; self.cover_thread=None; self.reload_db()
 
     def _start_metadata_queue(self) -> None:
         if self.metadata_thread and self.metadata_thread.isRunning(): return
         self.metadata_thread=QThread(self); self.metadata_worker=MetadataWorker(self.db.db_path,self.metadata_settings); self.metadata_worker.moveToThread(self.metadata_thread)
         self.metadata_thread.started.connect(self.metadata_worker.run); self.metadata_worker.finished.connect(self._metadata_finished); self.metadata_worker.failed.connect(self._metadata_failed)
         self.metadata_worker.finished.connect(self.metadata_thread.quit); self.metadata_worker.failed.connect(self.metadata_thread.quit); self.metadata_thread.finished.connect(self.metadata_thread.deleteLater); self.metadata_thread.start()
+
+    def toggle_metadata_pause(self):
+        if not self.metadata_worker: return
+        if self.btn_metadata_pause.text()=="Pause": self.metadata_worker.pause(); self.btn_metadata_pause.setText("Fortsetzen"); self.statusBar().showMessage("Metadaten-Queue pausiert")
+        else: self.metadata_worker.resume(); self.btn_metadata_pause.setText("Pause"); self.statusBar().showMessage("Metadaten-Queue fortgesetzt")
 
     def _metadata_finished(self, stats: dict) -> None:
         self.statusBar().showMessage(f"Metadaten: {stats['processed']} verarbeitet · {stats['ambiguous']} unklar · {stats['failed']} Fehler"); self.metadata_worker=None; self.metadata_thread=None; self.reload_db()
