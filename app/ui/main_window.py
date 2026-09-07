@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Qt
-from PySide6.QtGui import QAction, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QAction, QIcon, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QComboBox,
     QListWidget,
+    QListWidgetItem,
     QTabWidget,
 )
 
@@ -42,6 +43,9 @@ from app.services.hashing_service import HashingWorker
 from app.ui.cleanup_details_dialog import CleanupDetailsDialog
 from app.utils.formatting import human_size
 from app.utils.paths import get_database_path
+from app.settings import MetadataSettings
+from app.services.metadata_worker import MetadataWorker
+from app.ui.metadata_settings_dialog import MetadataSettingsDialog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +60,9 @@ class MainWindow(QMainWindow):
         self.drive_service = DriveService()
         self.connected_drives: list[DriveInfo] = []
         self.current_rows: list[dict] = []
+        self.metadata_settings = MetadataSettings.load()
+        self.metadata_thread: QThread | None = None
+        self.metadata_worker: MetadataWorker | None = None
 
         self.scan_thread: QThread | None = None
         self.scan_worker: ScannerWorker | None = None
@@ -75,6 +82,9 @@ class MainWindow(QMainWindow):
         if self.hash_thread and self.hash_thread.isRunning():
             self.hash_thread.quit()
             self.hash_thread.wait(2_000)
+        if self.metadata_worker: self.metadata_worker.cancel()
+        if self.metadata_thread and self.metadata_thread.isRunning():
+            self.metadata_thread.quit(); self.metadata_thread.wait(2_000)
         self.db.close()
         super().closeEvent(event)
 
@@ -198,10 +208,12 @@ class MainWindow(QMainWindow):
 
         grid_page = QWidget()
         grid_layout = QVBoxLayout(grid_page)
-        grid_layout.addWidget(QLabel(
-            "Coveransicht ist vorbereitet. Bis Metadaten-Provider eingerichtet sind, "
-            "werden neutrale Platzhalter verwendet."
-        ))
+        metadata_controls = QHBoxLayout()
+        self.btn_metadata_all = QPushButton("Metadaten für alle fehlenden Spiele abrufen")
+        self.btn_covers_all = QPushButton("Cover für gematchte Spiele laden")
+        self.btn_metadata_settings = QPushButton("Metadaten & Cover einstellen")
+        metadata_controls.addWidget(self.btn_metadata_all); metadata_controls.addWidget(self.btn_covers_all); metadata_controls.addWidget(self.btn_metadata_settings)
+        grid_layout.addLayout(metadata_controls)
         self.cover_placeholders = QListWidget()
         grid_layout.addWidget(self.cover_placeholders)
         self.library_tabs.addTab(grid_page, "Coveransicht")
@@ -232,6 +244,9 @@ class MainWindow(QMainWindow):
         self.btn_reload_db.clicked.connect(self.reload_db)
         self.btn_export.clicked.connect(self.export_csv)
         self.btn_open_folder.clicked.connect(self.open_selected_folder)
+        self.btn_metadata_all.clicked.connect(self.enqueue_all_metadata)
+        self.btn_covers_all.clicked.connect(self.enqueue_missing_covers)
+        self.btn_metadata_settings.clicked.connect(self.open_metadata_settings)
 
         self.search_input.textChanged.connect(self.reload_db)
         self.drive_filter.currentIndexChanged.connect(self.reload_db)
@@ -336,6 +351,8 @@ class MainWindow(QMainWindow):
         if stats.get("cancelled"):
             msg = "Scan abgebrochen. " + msg
         self.statusBar().showMessage(msg)
+        if self.metadata_settings.automatic_search and not stats.get("cancelled"):
+            if self.db.enqueue_metadata(): self._start_metadata_queue()
 
         archive_only_dirs = stats.get("archive_only_dirs", [])
         if archive_only_dirs:
@@ -373,8 +390,13 @@ class MainWindow(QMainWindow):
         self._reload_platform_filter()
         self._reload_cleanup()
         self.cover_placeholders.clear()
+        seen = set()
         for row in self.current_rows:
-            self.cover_placeholders.addItem(f"▧  {row['title']}\n    {row['platform']}")
+            if row.get("game_id") in seen: continue
+            seen.add(row.get("game_id")); year = f" · {row['metadata_release_year']}" if row.get("metadata_release_year") else ""
+            item = QListWidgetItem(f"{row.get('canonical_title') or row['title']}\n{row['platform']}{year}")
+            if row.get("cover_path") and Path(row["cover_path"]).is_file(): item.setIcon(QIcon(row["cover_path"]))
+            self.cover_placeholders.addItem(item)
         self.statusBar().showMessage(f"{len(self.current_rows)} Einträge geladen.")
 
     def _reload_drive_filter(self) -> None:
@@ -473,7 +495,43 @@ class MainWindow(QMainWindow):
         menu.addAction(act_open)
         menu.addAction(act_copy)
         menu.addAction(act_hash)
+        row = self._selected_row_data()
+        if row:
+            menu.addSeparator()
+            search = menu.addAction("Metadaten suchen")
+            refresh = menu.addAction("Metadaten aktualisieren")
+            reset = menu.addAction("Metadaten zurücksetzen")
+            search.triggered.connect(lambda: self.enqueue_game(row["game_id"], False))
+            refresh.triggered.connect(lambda: self.enqueue_game(row["game_id"], True))
+            reset.triggered.connect(lambda: (self.db.reset_metadata(row["game_id"]), self.reload_db()))
         menu.exec(self.games_table.viewport().mapToGlobal(pos))
+
+    def open_metadata_settings(self) -> None:
+        MetadataSettingsDialog(self.metadata_settings, self).exec()
+
+    def enqueue_game(self, game_id: int, force=False) -> None:
+        if self.db.enqueue_metadata([game_id], force): self._start_metadata_queue()
+
+    def enqueue_all_metadata(self) -> None:
+        count = self.db.enqueue_metadata(); self.statusBar().showMessage(f"Metadaten: {count} Spiele eingereiht")
+        if count: self._start_metadata_queue()
+
+    def enqueue_missing_covers(self) -> None:
+        ids = [r[0] for r in self.db._conn.execute("SELECT id FROM games WHERE metadata_status IN ('matched','manual') AND COALESCE(cover_path,'')='' ")]
+        count = self.db.enqueue_metadata(ids, True); self.statusBar().showMessage(f"Cover: {count} Spiele eingereiht")
+        if count: self._start_metadata_queue()
+
+    def _start_metadata_queue(self) -> None:
+        if self.metadata_thread and self.metadata_thread.isRunning(): return
+        self.metadata_thread=QThread(self); self.metadata_worker=MetadataWorker(self.db.db_path,self.metadata_settings); self.metadata_worker.moveToThread(self.metadata_thread)
+        self.metadata_thread.started.connect(self.metadata_worker.run); self.metadata_worker.finished.connect(self._metadata_finished); self.metadata_worker.failed.connect(self._metadata_failed)
+        self.metadata_worker.finished.connect(self.metadata_thread.quit); self.metadata_worker.failed.connect(self.metadata_thread.quit); self.metadata_thread.finished.connect(self.metadata_thread.deleteLater); self.metadata_thread.start()
+
+    def _metadata_finished(self, stats: dict) -> None:
+        self.statusBar().showMessage(f"Metadaten: {stats['processed']} verarbeitet · {stats['ambiguous']} unklar · {stats['failed']} Fehler"); self.metadata_worker=None; self.metadata_thread=None; self.reload_db()
+
+    def _metadata_failed(self, message: str) -> None:
+        self.statusBar().showMessage("Metadaten-Queue: " + message); self.metadata_worker=None; self.metadata_thread=None; self.reload_db()
 
     def hash_selected_file(self) -> None:
         row = self._selected_row_data()
