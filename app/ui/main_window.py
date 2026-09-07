@@ -39,6 +39,7 @@ from app.models.drive import DriveInfo
 from app.services.drive_service import DriveService
 from app.services.scanner_worker import ScannerWorker
 from app.services.hashing_service import HashingWorker
+from app.ui.cleanup_details_dialog import CleanupDetailsDialog
 from app.utils.formatting import human_size
 from app.utils.paths import get_database_path
 
@@ -102,9 +103,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.btn_scan_all)
         controls_layout.addWidget(self.btn_cancel_scan)
 
-        self.chk_archive_only_dirs = QCheckBox(
-            "Nur Ordner mit .rar/.zip ohne ISO/ROM melden"
-        )
+        self.chk_archive_only_dirs = QCheckBox("Archive ohne erkannte Spiele-/ROM-Datei erfassen")
 
         self.drive_table = QTableView()
         self.drive_model = QStandardItemModel(0, 4)
@@ -410,20 +409,11 @@ class MainWindow(QMainWindow):
         self.cleanup_list.clear()
         for label, count in self.db.cleanup_counts().items():
             self.cleanup_list.addItem(f"{count}  {label}")
+            self.cleanup_list.item(self.cleanup_list.count() - 1).setData(Qt.ItemDataRole.UserRole, label)
 
     def _apply_cleanup_filter(self, item) -> None:
-        label = item.text()
-        if "Unbekannte Plattformen" in label:
-            index = self.platform_filter.findData("Unknown")
-            if index >= 0:
-                self.platform_filter.setCurrentIndex(index)
-            self.library_tabs.setCurrentIndex(0)
-        elif "Fehlende Dateien" in label:
-            self.search_input.setText("")
-            QMessageBox.information(self, "Aufräumen", "Fehlende Dateien sind in der Tabelle mit '(fehlt)' markiert.")
-            self.library_tabs.setCurrentIndex(0)
-        else:
-            QMessageBox.information(self, "Aufräumen", "Die Kategorie wird aktuell als sichere Analyseübersicht angezeigt; Dateien werden niemals automatisch verändert.")
+        label = item.data(Qt.ItemDataRole.UserRole)
+        CleanupDetailsDialog(label, self.db.cleanup_details(label), self).exec()
 
     def update_details(self) -> None:
         idx = self.games_table.currentIndex()
@@ -581,7 +571,7 @@ class MainWindow(QMainWindow):
 
         layout = QVBoxLayout(dialog)
         description = QLabel(
-            "Folgende Ordner enthalten .rar/.zip, aber keine .iso/.nsp/.xci/.bin/.cue/.img:"
+            "Folgende Ordner enthalten unterstützte Archive, aber keine erkannte Spiele-/ROM-Datei."
         )
         layout.addWidget(description)
 

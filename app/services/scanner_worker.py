@@ -6,7 +6,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
-from app.config import ARCHIVE_EXTENSIONS, SCAN_BATCH_SIZE, SUPPORTED_MEDIA_EXTENSIONS
+from app.config import (ARCHIVE_EXTENSIONS, SCAN_BATCH_SIZE, SUPPORTED_MEDIA_EXTENSIONS,
+                        is_unknown_media_candidate)
 from app.database.db_manager import DatabaseManager
 from app.models.drive import DriveInfo
 from app.models.game_entry import MediaEntry
@@ -72,6 +73,11 @@ class ScannerWorker(QObject):
                                             found += 1; drive_found += 1
                                             if len(batch) >= SCAN_BATCH_SIZE: db.upsert_entries(batch); batch.clear()
                                         elif suffix in ARCHIVE_EXTENSIONS: has_archive = True
+                                        elif is_unknown_media_candidate(suffix):
+                                            stat = child.stat()
+                                            db.upsert_unknown_candidate(drive.volume_serial, str(child.resolve()),
+                                                                        child.name, suffix, stat.st_size,
+                                                                        now_iso(), scan_id)
                                     except OSError as exc:
                                         warnings += 1; drive_warnings += 1
                                         LOGGER.warning("Eintrag nicht lesbar: %s (%s)", child, exc)
@@ -85,12 +91,14 @@ class ScannerWorker(QObject):
                                 resolved = str(current.resolve())
                                 if resolved not in archive_only_dirs:
                                     archive_only_dirs.append(resolved)
-                                    db.upsert_archive_only_dir(drive.volume_serial, resolved, drive_started)
+                                    db.upsert_archive_only_dir(drive.volume_serial, resolved, drive_started, scan_id)
                     if batch: db.upsert_entries(batch)
                     status = (ScanStatus.CANCELLED if self._cancelled else
                               ScanStatus.COMPLETED_WITH_WARNINGS if drive_warnings else ScanStatus.COMPLETED)
                     if status is ScanStatus.COMPLETED:
                         db.mark_missing_for_completed_scan(drive.volume_serial, drive_started, status)
+                    db.finalize_auxiliary_scan(drive.volume_serial, scan_id, status,
+                                               self.report_archive_only_dirs)
                     db.finish_scan(scan_id, status, drive_processed, drive_found, drive_warnings)
                     LOGGER.info("Scan beendet: %s, Status=%s", drive.display_name, status)
                     if status is not ScanStatus.COMPLETED: overall_status = status
