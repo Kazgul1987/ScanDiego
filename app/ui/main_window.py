@@ -542,6 +542,7 @@ class MainWindow(QMainWindow):
             cover = menu.addAction("Cover laden / aktualisieren")
             remove_cover = menu.addAction("Cover entfernen")
             reset = menu.addAction("Metadaten zurücksetzen")
+            change_platform = menu.addAction("Plattform ändern...")
             search.triggered.connect(lambda: self.enqueue_game(row["game_id"], False))
             refresh.triggered.connect(lambda: self.enqueue_game(row["game_id"], True))
             review.setEnabled(row.get("metadata_status") == "ambiguous")
@@ -550,10 +551,21 @@ class MainWindow(QMainWindow):
             cover.triggered.connect(lambda: (self.db.enqueue_covers([row["game_id"]], True), self._start_cover_queue()))
             remove_cover.triggered.connect(lambda: self._remove_cover(row["game_id"]))
             reset.triggered.connect(lambda: (self.db.reset_metadata(row["game_id"]), self.reload_db()))
+            change_platform.triggered.connect(lambda: self.change_game_platform(row["game_id"], row["platform"]))
         menu.exec(self.games_table.viewport().mapToGlobal(pos))
 
     def open_metadata_settings(self) -> None:
         MetadataSettingsDialog(self.metadata_settings, self).exec()
+
+    def change_game_platform(self, game_id: int, current: str) -> None:
+        values = ["PC", "PlayStation", "Xbox", "Nintendo", "Sega", "Unknown"]
+        dialog = QDialog(self); dialog.setWindowTitle("Plattform ändern")
+        layout = QVBoxLayout(dialog); combo = QComboBox(dialog); combo.addItems(values)
+        combo.setCurrentText(current if current in values else "Unknown"); layout.addWidget(combo)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept); buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
+        if dialog.exec():
+            self.db.set_game_platform(game_id, combo.currentText(), True); self.reload_db()
 
     def open_match_review(self, game_id):
         game=self.db._conn.execute("SELECT * FROM games WHERE id=?",(game_id,)).fetchone()
@@ -567,7 +579,15 @@ class MainWindow(QMainWindow):
         if self.db.enqueue_metadata([game_id], force): self._start_metadata_queue()
 
     def enqueue_all_metadata(self) -> None:
-        count = self.db.enqueue_metadata(); self.statusBar().showMessage(f"Metadaten: {count} Spiele eingereiht")
+        if self.metadata_settings.metadata_provider == "igdb" and not (
+                self.metadata_settings.igdb_client_id.strip() and self.metadata_settings.igdb_client_secret.strip()):
+            message = "IGDB ist nicht vollständig konfiguriert.\nBitte zuerst Metadaten & Cover einstellen."
+            self.statusBar().showMessage(message.replace("\n", " ")); QMessageBox.information(self, "Metadaten", message); return
+        count = self.db.enqueue_metadata()
+        if not count:
+            message = "Keine Spiele mit fehlenden oder fehlgeschlagenen Metadaten gefunden."
+            self.statusBar().showMessage(message); return
+        self.statusBar().showMessage(f"Metadaten: {count} Spiele eingereiht")
         if count: self._start_metadata_queue()
 
     def enqueue_missing_covers(self) -> None:

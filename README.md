@@ -1,4 +1,4 @@
-# ScanDiego 0.9.1
+# ScanDiego 0.9.2
 
 ScanDiego ist ein lokaler Game-Collection-Manager für Windows (Python, PySide6 und SQLite). Die Anwendung erkennt externe Datenträger anhand ihrer **Volume Serial Number**, scannt deren Verzeichnisse `Games` und `ROMs` im Hintergrund und bewahrt den ursprünglichen Dateinamen neben einem lesbaren Titel auf.
 
@@ -28,7 +28,7 @@ Unterstützt werden `.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`, `.chd`, `.cs
 
 ## Datenbank und Migration
 
-Die portable Datenbank liegt bei einem Quellstart in `data/scandiego.db`, beim gebauten Programm relativ zur EXE. Alte `media_entries` bleiben erhalten und werden beim ersten Start transaktional um additive Spalten ergänzt. Bestehende Zeilen werden in die normalisierten Tabellen `games`, `media_files` und `drives` übernommen; `scan_runs` protokolliert Scanstatus und Statistiken. Schema 6 ergänzt `MediaFile` verlustfrei um Content-Typ, Titel, Version, technische IDs, Parent, Region, Erkennungsaudit und manuellen Lock. Bestehende Dateien starten sicher als `unknown`. Die bisherige Tabelle bleibt als kompatible Projektion für UI, Filter und Export bestehen.
+Die portable Datenbank liegt bei einem Quellstart in `data/scandiego.db`, beim gebauten Programm relativ zur EXE. Alte `media_entries` bleiben erhalten und werden beim ersten Start transaktional um additive Spalten ergänzt. Bestehende Zeilen werden in die normalisierten Tabellen `games`, `media_files` und `drives` übernommen; `scan_runs` protokolliert Scanstatus und Statistiken. Schema 7 ergänzt Metadatenkandidaten additiv um die vollständige Provider-Plattformliste; die vorhandene manuelle Plattform-Sperre schützt Korrekturen vor späteren Scans. Das Content-Modell aus Schema 6 bleibt unverändert. Die bisherige Tabelle bleibt als kompatible Projektion für UI, Filter und Export bestehen.
 
 ## Content-Modell (0.9)
 
@@ -88,6 +88,8 @@ Ein portabler Build wird mit `build.bat` erzeugt. Logs rotieren unter `logs/app.
 ## Metadaten und Cover
 
 Die austauschbare Provider-Schicht nutzt zunächst **IGDB** für Spieldaten und **SteamGridDB** für vertikale Cover. IGDB benötigt eine Twitch/IGDB Client-ID und ein Client-Secret, SteamGridDB einen API-Key. Diese können unter **Metadaten & Cover** oder bevorzugt über `SCANDIEGO_IGDB_CLIENT_ID`, `SCANDIEGO_IGDB_CLIENT_SECRET` und `SCANDIEGO_STEAMGRIDDB_API_KEY` gesetzt werden. Die lokale `data/settings.json` und der Cover-Ordner sind von Git ausgeschlossen; Passwortfelder sind maskiert. Secrets werden nie protokolliert.
+
+IGDB-Multiplattformspiele bleiben ein einzelner Kandidat. Der Prüfdialog zeigt alle Plattformen und verlangt bei unbekannter lokaler Plattform eine bewusste Auswahl; bekannte Plattformen werden bevorzugt und nicht ungefragt überschrieben. Der Bulk-Abruf verarbeitet sowohl noch nicht angefragte als auch zuvor fehlgeschlagene Spiele erneut, sofern IGDB vollständig konfiguriert ist.
 
 Nach einem Scan kann die automatische, strikt nachgelagerte Metadaten-Queue gestartet werden. Sie läuft sequenziell in einem eigenen `QThread`, ist abbrechbar/pausierbar, setzt persistente Zustände (`not_requested`, `queued`, `searching`, `matched`, `ambiguous`, `incomplete`, `failed`, `manual`) und nimmt nach einem Neustart unterbrochene Arbeit wieder auf. Ein Fehler stoppt andere Spiele nicht. Bereits verknüpfte Provider-IDs werden direkt abgerufen; manuelle Matches werden von normalen Läufen geschützt.
 

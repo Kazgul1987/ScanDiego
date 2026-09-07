@@ -34,7 +34,7 @@ class PlatformDetectionService:
         Platform.MEGA_DRIVE: ("mega drive", "megadrive", "genesis"),
         Platform.SATURN: ("saturn", "sega saturn"),
         Platform.DREAMCAST: ("dreamcast", "sega dreamcast"),
-        Platform.PC: ("pc games", "windows games"),
+        Platform.PC: ("pc", "windows", "win", "pc games", "windows games"),
     }
     _extensions = {
         ".xci": Platform.SWITCH, ".nsp": Platform.SWITCH, ".nsz": Platform.SWITCH,
@@ -60,3 +60,30 @@ class PlatformDetectionService:
         suffix = PureWindowsPath(raw).suffix.lower()
         return self._extensions.get(suffix, Platform.UNKNOWN)
 
+    @staticmethod
+    def normalize_external(name: str) -> str:
+        """Map provider platform labels through one conservative central mapping."""
+        value = re.sub(r"[-_.]+", " ", name).strip().casefold()
+        if value in {"pc", "windows", "win", "pc (microsoft windows)"}:
+            return "PC"
+        if value.startswith("playstation") or value in {"ps1", "ps2", "ps3", "ps4", "ps5", "ps vita", "psp"}:
+            return "PlayStation"
+        if value.startswith("xbox"):
+            return "Xbox"
+        if (value.startswith("nintendo") or value.startswith("wii") or value in
+                {"switch", "gamecube", "game boy", "game boy color", "game boy advance", "nes", "snes"}):
+            return "Nintendo"
+        if any(token in value for token in ("sega", "dreamcast", "saturn", "mega drive", "genesis")):
+            return "Sega"
+        return "Unknown"
+
+    @staticmethod
+    def family(name: str) -> str:
+        """Return the broad ScanDiego family used for metadata comparison."""
+        value = name.casefold()
+        if value == "pc" or value in {"windows", "win", "pc (microsoft windows)"}: return "PC"
+        if "playstation" in value or value.startswith("ps"): return "PlayStation"
+        if "xbox" in value: return "Xbox"
+        if any(x in value for x in ("nintendo", "switch", "wii", "gamecube", "game boy", "snes", "nes")): return "Nintendo"
+        if any(x in value for x in ("sega", "dreamcast", "saturn", "mega drive", "genesis")): return "Sega"
+        return "Unknown"

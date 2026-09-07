@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import sqlite3
 import uuid
 from dataclasses import asdict
@@ -12,12 +13,12 @@ from app.models.content import (ContentDetectionMethod, ContentDetectionResult,
                                 MediaContentType)
 from app.services.content_association_service import ContentAssociationService
 from app.models.scan import ScanStatus
-from app.models.metadata import ExternalGame, MetadataStatus
+from app.models.metadata import ExternalGame, ExternalPlatform, MetadataStatus
 from app.services.duplicate_detection_service import DuplicateDetectionService, DuplicateGroup, DuplicateStatus
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class DatabaseError(RuntimeError):
@@ -162,6 +163,7 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_files_base_content_id ON media_files(base_content_id);
                 CREATE INDEX IF NOT EXISTS idx_files_parent_game ON media_files(content_parent_game_id);
             """)
+            self._add_column("metadata_match_candidates", "platforms_json TEXT NOT NULL DEFAULT '[]'")
             # Interrupted work is safe to reconstruct on next startup.
             self._conn.execute("UPDATE games SET metadata_status=? WHERE metadata_status=?", (MetadataStatus.QUEUED, MetadataStatus.SEARCHING))
             self._backfill_normalized_tables()
@@ -235,6 +237,7 @@ class DatabaseManager:
         if existing and existing["platform_overridden"]:
             payload["platform"] = existing["platform"]
             payload["platform_overridden"] = 1
+            payload["game_id"] = existing["game_id"]
         if existing and existing["content_locked"]:
             for name in ("content_type", "content_title", "content_version", "content_id",
                          "base_content_id", "content_detection_method", "content_detection_confidence",
@@ -286,10 +289,17 @@ class DatabaseManager:
             (item["drive_id"], item.get("drive_label"), item.get("drive_letter"), timestamp))
         drive_pk = self._conn.execute("SELECT id FROM drives WHERE volume_serial=?", (item["drive_id"],)).fetchone()[0]
         platform = item.get("platform") or "Unknown"
-        self._conn.execute("""INSERT INTO games(title,sort_title,platform,platform_overridden,created_at,updated_at)
-            VALUES(?,?,?,?,?,?) ON CONFLICT(title,platform) DO UPDATE SET updated_at=excluded.updated_at""",
-            (item["title"], item["title"].casefold(), platform, item.get("platform_overridden", 0), timestamp, timestamp))
-        game_pk = self._conn.execute("SELECT id FROM games WHERE title=? AND platform=?", (item["title"], platform)).fetchone()[0]
+        locked_game_id = item.get("game_id") if item.get("platform_overridden") else None
+        locked_game = self._conn.execute("SELECT id FROM games WHERE id=?", (locked_game_id,)).fetchone() if locked_game_id else None
+        if locked_game:
+            game_pk = locked_game[0]
+            self._conn.execute("UPDATE games SET platform=?,platform_overridden=1,updated_at=? WHERE id=?",
+                               (platform, timestamp, game_pk))
+        else:
+            self._conn.execute("""INSERT INTO games(title,sort_title,platform,platform_overridden,created_at,updated_at)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(title,platform) DO UPDATE SET updated_at=excluded.updated_at""",
+                (item["title"], item["title"].casefold(), platform, item.get("platform_overridden", 0), timestamp, timestamp))
+            game_pk = self._conn.execute("SELECT id FROM games WHERE title=? AND platform=?", (item["title"], platform)).fetchone()[0]
         existing_file = self._conn.execute("SELECT game_id,content_locked FROM media_files WHERE drive_id=? AND full_path=?", (drive_pk, item["full_path"])).fetchone()
         if existing_file and existing_file["content_locked"]:
             game_pk = existing_file["game_id"]
@@ -555,7 +565,7 @@ class DatabaseManager:
         params: list[Any] = []
         base_filter = """EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type='base_game')
             OR NOT EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type<>'unknown')"""
-        where = f"metadata_status='not_requested' AND ({base_filter})"
+        where = f"metadata_status IN ('not_requested','failed') AND metadata_locked=0 AND ({base_filter})"
         if game_ids is not None:
             ids = list(game_ids)
             if not ids: return 0
@@ -580,16 +590,23 @@ class DatabaseManager:
             for match in ranked[:10]:
                 game = match.game
                 self._conn.execute("""INSERT INTO metadata_match_candidates
-                    (game_id,provider,external_game_id,title,platform,release_date,release_year,score,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?)""", (game_id, provider, game.external_id, game.title, game.platform,
-                    game.release_date, game.release_year, match.score, now_iso()))
+                    (game_id,provider,external_game_id,title,platform,release_date,release_year,score,created_at,platforms_json)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""", (game_id, provider, game.external_id, game.title, game.platform,
+                    game.release_date, game.release_year, match.score, now_iso(),
+                    json.dumps([asdict(platform) for platform in game.available_platforms])))
 
     def list_candidates(self, game_id: int) -> list[sqlite3.Row]:
         return list(self._conn.execute("SELECT * FROM metadata_match_candidates WHERE game_id=? ORDER BY score DESC", (game_id,)))
 
+    @staticmethod
+    def candidate_platforms(candidate: sqlite3.Row | dict) -> list[ExternalPlatform]:
+        raw = candidate["platforms_json"] if "platforms_json" in candidate.keys() else "[]"
+        return [ExternalPlatform(**item) for item in json.loads(raw or "[]")]
+
     def apply_metadata(self, game_id: int, game: ExternalGame, provider: str, score: float,
-                       method: str, status: MetadataStatus = MetadataStatus.MATCHED) -> None:
-        current = self._conn.execute("SELECT metadata_locked FROM games WHERE id=?", (game_id,)).fetchone()
+                       method: str, status: MetadataStatus = MetadataStatus.MATCHED,
+                       update_local_platform: bool = False) -> None:
+        current = self._conn.execute("SELECT metadata_locked,platform FROM games WHERE id=?", (game_id,)).fetchone()
         if not current: raise DatabaseError("Spiel nicht gefunden")
         if current[0] and method not in {"manual", "refresh"}: return
         timestamp = now_iso()
@@ -600,11 +617,33 @@ class DatabaseManager:
                 metadata_locked=CASE WHEN ?='manual' THEN 1 ELSE metadata_locked END,updated_at=? WHERE id=?""",
                 (game.title, game.external_id, game.external_platform_id, game.release_date, game.release_year,
                  game.publisher, game.developer, game.description, game.region, provider, status, timestamp, score, method, method, timestamp, game_id))
+            if update_local_platform and game.platform and game.platform != "Unknown":
+                self._set_game_platform_no_commit(game_id, game.platform, method == "manual")
             self._conn.execute("DELETE FROM metadata_match_candidates WHERE game_id=?", (game_id,))
 
-    def apply_candidate_manually(self, game_id: int, external: ExternalGame, provider: str, score: float) -> None:
-        self.apply_metadata(game_id, external, provider, score, "manual", MetadataStatus.MANUAL)
+    def apply_candidate_manually(self, game_id: int, external: ExternalGame, provider: str, score: float,
+                                 update_local_platform: bool = False) -> None:
+        current = self._conn.execute("SELECT platform FROM games WHERE id=?", (game_id,)).fetchone()
+        update = update_local_platform or (current and current[0] == "Unknown")
+        if current and current[0] != "Unknown" and not update_local_platform and external.available_platforms:
+            from app.services.platform_detection_service import PlatformDetectionService
+            family = PlatformDetectionService.family(current[0])
+            matching = next((p for p in external.available_platforms if p.normalized_platform == family), None)
+            if matching:
+                from dataclasses import replace
+                external = replace(external, platform=current[0], external_platform_id=matching.external_platform_id)
+        self.apply_metadata(game_id, external, provider, score, "manual", MetadataStatus.MANUAL, update)
         LOGGER.info("Manueller Metadata-Match game=%s provider=%s", game_id, provider)
+
+    def _set_game_platform_no_commit(self, game_id: int, platform: str, locked: bool) -> None:
+        self._conn.execute("UPDATE games SET platform=?,platform_overridden=? WHERE id=?",
+                           (platform, int(locked), game_id))
+        self._conn.execute("UPDATE media_entries SET platform=?,platform_overridden=? WHERE game_id=?",
+                           (platform, int(locked), game_id))
+
+    def set_game_platform(self, game_id: int, platform: str, locked: bool = True) -> None:
+        with self._conn:
+            self._set_game_platform_no_commit(game_id, platform, locked)
 
     def set_cover(self, game_id: int, path: str | None, source: str | None) -> None:
         self._conn.execute("UPDATE games SET cover_path=?,cover_source=?,updated_at=? WHERE id=?", (path, source, now_iso(), game_id)); self._conn.commit()
