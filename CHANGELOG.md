@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.0 – 2026-09-07
+
+- Additives Schema v6 mit zentralen Content-Typen, technischen IDs, Parent-Relation, Confidence und manuellem Lock.
+- Konservative Erkennung für Base Games, Updates, DLC/Add-ons und Demos samt Version und Basistitel.
+- Austauschbarer, auf 64 KiB begrenzter Switch-Parser ohne Schlüssel- oder DRM-Funktionen sowie Title-ID-Fallback.
+- Plattformbewusste Parent-Zuordnung, sichere Legacy-Konsolidierung und nachgelagerte Content-Analyse-Queue.
+- Content-bewusste Dubletten-/Metadata-Logik, neue Cleanup-Kategorien sowie gruppierte Game-Details und Badges.
+
 ## 0.8.0 – 2026-09-07
 
 - Dauerhafter Manual-Match-Schutz (`metadata_locked`) und Status `no_match`.

@@ -201,12 +201,22 @@ class MainWindow(QMainWindow):
         self.detail_last_seen = QLabel("-")
         self.detail_modified = QLabel("-")
         self.detail_missing = QLabel("-")
+        self.detail_base_files = QLabel("-")
+        self.detail_updates = QLabel("-")
+        self.detail_addons = QLabel("-")
+        self.detail_other_content = QLabel("-")
+        for label in (self.detail_base_files, self.detail_updates, self.detail_addons, self.detail_other_content):
+            label.setWordWrap(True)
         details_layout.addRow("Titel:", self.detail_title)
         details_layout.addRow("Vollständiger Pfad:", self.detail_full_path)
         details_layout.addRow("Festplatte:", self.detail_drive)
         details_layout.addRow("Letzte Sichtung:", self.detail_last_seen)
         details_layout.addRow("Datei geändert:", self.detail_modified)
         details_layout.addRow("Status:", self.detail_missing)
+        details_layout.addRow("Hauptspiel:", self.detail_base_files)
+        details_layout.addRow("Updates:", self.detail_updates)
+        details_layout.addRow("DLC / Add-ons:", self.detail_addons)
+        details_layout.addRow("Sonstige / Unknown:", self.detail_other_content)
 
         library_layout.addLayout(filter_layout)
         library_layout.addWidget(self.games_table, 1)
@@ -404,7 +414,11 @@ class MainWindow(QMainWindow):
         for row in self.current_rows:
             if row.get("game_id") in seen: continue
             seen.add(row.get("game_id")); year = f" · {row['metadata_release_year']}" if row.get("metadata_release_year") else ""
-            item = QListWidgetItem(f"{row.get('canonical_title') or row['title']}\n{row['platform']}{year}")
+            content = self.db.game_content_files(row["game_id"])
+            updates = sum(item["content_type"] == "update" for item in content)
+            addons = sum(item["content_type"] in {"dlc", "addon"} for item in content)
+            badges = f"\n{updates} Updates · {addons} DLCs" if updates or addons else ""
+            item = QListWidgetItem(f"{row.get('canonical_title') or row['title']}\n{row['platform']}{year}{badges}")
             if row.get("cover_path") and Path(row["cover_path"]).is_file(): item.setIcon(QIcon(row["cover_path"]))
             self.cover_placeholders.addItem(item)
         self.statusBar().showMessage(f"{len(self.current_rows)} Einträge geladen.")
@@ -464,6 +478,18 @@ class MainWindow(QMainWindow):
         self.detail_last_seen.setText(data["last_seen_date"])
         self.detail_modified.setText(data["modified_time"])
         self.detail_missing.setText("Nicht gefunden" if data["is_missing"] else "Vorhanden")
+        content_rows = [dict(item) for item in self.db.game_content_files(data["game_id"])]
+        def lines(types, include_version=False):
+            values = []
+            for item in content_rows:
+                if item["content_type"] in types:
+                    version = f" · v{item['content_version']}" if include_version and item.get("content_version") else ""
+                    values.append(f"{item.get('content_title') or item['file_name']}{version} · {human_size(item['file_size'])} · {item['full_path']}")
+            return "\n".join(values) or "-"
+        self.detail_base_files.setText(lines({"base_game"}))
+        self.detail_updates.setText(lines({"update"}, True))
+        self.detail_addons.setText(lines({"dlc", "addon"}))
+        self.detail_other_content.setText(lines({"unknown", "demo"}))
 
     def _selected_row_data(self) -> dict | None:
         idx = self.games_table.currentIndex()
