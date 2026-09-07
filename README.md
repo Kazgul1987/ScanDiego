@@ -1,4 +1,4 @@
-# ScanDiego 0.7.0
+# ScanDiego 0.9.0
 
 ScanDiego ist ein lokaler Game-Collection-Manager für Windows (Python, PySide6 und SQLite). Die Anwendung erkennt externe Datenträger anhand ihrer **Volume Serial Number**, scannt deren Verzeichnisse `Games` und `ROMs` im Hintergrund und bewahrt den ursprünglichen Dateinamen neben einem lesbaren Titel auf.
 
@@ -28,7 +28,34 @@ Unterstützt werden `.iso`, `.nsp`, `.xci`, `.bin`, `.cue`, `.img`, `.chd`, `.cs
 
 ## Datenbank und Migration
 
-Die portable Datenbank liegt bei einem Quellstart in `data/scandiego.db`, beim gebauten Programm relativ zur EXE. Alte `media_entries` bleiben erhalten und werden beim ersten Start transaktional um additive Spalten ergänzt. Bestehende Zeilen werden in die normalisierten Tabellen `games`, `media_files` und `drives` übernommen; `scan_runs` protokolliert Scanstatus und Statistiken. Schema 4 ergänzt verlustfrei externe IDs, Beschreibungen, Match-Auditfelder, Coverquellen und die Kandidatentabelle; frühere Migrationen bleiben unverändert erhalten. Die bisherige Tabelle bleibt als kompatible Projektion für UI, Filter und Export bestehen.
+Die portable Datenbank liegt bei einem Quellstart in `data/scandiego.db`, beim gebauten Programm relativ zur EXE. Alte `media_entries` bleiben erhalten und werden beim ersten Start transaktional um additive Spalten ergänzt. Bestehende Zeilen werden in die normalisierten Tabellen `games`, `media_files` und `drives` übernommen; `scan_runs` protokolliert Scanstatus und Statistiken. Schema 6 ergänzt `MediaFile` verlustfrei um Content-Typ, Titel, Version, technische IDs, Parent, Region, Erkennungsaudit und manuellen Lock. Bestehende Dateien starten sicher als `unknown`. Die bisherige Tabelle bleibt als kompatible Projektion für UI, Filter und Export bestehen.
+
+## Content-Modell (0.9)
+
+Ein `Game` kann beliebig viele Hauptspiel-Dateien, Updates und DLCs/Add-ons besitzen. Die zentralen
+Typen sind `base_game`, `update`, `dlc`, `addon`, `demo` und `unknown`; die Dateinamenerkennung
+behandelt DLC als Oberbegriff, während `addon` für künftige Parser und manuelle Zuordnungen erhalten
+bleibt. Explizite, wortbegrenzte Marker erkennen Updates, Versionen, DLC-/Expansion-Pakete und Demos.
+Eine getrennte Basistitel-Logik entfernt nur erkannte Content-Suffixe und verändert weder Dateien noch
+die allgemeine Titel-Normalisierung. Titel und Plattform müssen eindeutig übereinstimmen; eine exakte
+technische Base-ID hat Vorrang. Unsichere oder elternlose Funde bleiben unzugeordnet und erscheinen im
+Aufräumen. Manuelle Zuordnungen werden dauerhaft gesperrt.
+
+Der austauschbare Switch-Parser unterstützt `.nsp`, `.xci`, `.nsz` und `.xcz`, liest höchstens 64 KiB
+und verarbeitet ausschließlich offen vorliegende Metadaten. Zusätzlich werden eindeutige 16-stellige
+Title IDs in Dateinamen verwendet. Die zentral getestete Beziehung wertet Offset `000` als Base,
+`800` als Update und den folgenden `0x1000`-Block mit nicht-null Content-Index als DLC. Normale verschlüsselte NCA-Metadaten
+werden **nicht** entschlüsselt: es gibt keine eingebetteten Keys, Key-Downloads, Key-Erzeugung oder
+DRM-Umgehung. ScanDiego konfiguriert derzeit bewusst auch kein Keyfile; ohne Keys funktionieren
+Dateinamen-Fallback, Zuordnung, Bibliothek, Queues und Cleanup vollständig. Ein nicht lesbarer
+Container erzeugt nur eine Warnung und stoppt weder Scan noch Analyse.
+
+Die Cover-Bibliothek bleibt auf Game-Ebene und zeigt kleine Update-/DLC-Zähler. Details gruppieren
+Hauptspiele, Updates, DLC/Add-ons und sonstigen Content. Die Metadaten-Queue ignoriert reine,
+zugeordnete Zusatz-Game-Datensätze. Alte eindeutige DLC-/Update-Games werden nur dann entfernt, wenn
+ihre Datei sicher umgehängt wurde, der Datensatz leer und ungelockt ist und keine relevanten
+Metadaten/Cover trägt. Cleanup ist stets read-only und ergänzt elternlose DLCs/Updates, unbekannte
+Typen, mehrere Base-Dateien, unsichere Zuordnungen und manuelle Prüfung.
 
 ## Installation und Start
 

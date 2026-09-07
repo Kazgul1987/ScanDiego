@@ -39,7 +39,9 @@ class CleanupDetailsDialog(QDialog):
         else:
             rows = [dict(item) for item in findings]
             preferred = [name for name in ("title", "platform", "file_name", "full_path", "folder_path",
-                         "extension", "file_size", "drive_id", "metadata_status", "last_seen")
+                         "content_type", "possible_base_title", "current_game", "suggested_parent_game",
+                         "content_detection_confidence", "content_detection_method", "extension", "file_size",
+                         "drive_id", "metadata_status", "last_seen")
                          if rows and name in rows[0]]
             model.setHorizontalHeaderLabels(preferred or ["Ergebnis"])
             for row in rows:

@@ -8,13 +8,16 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from app.models.game_entry import MediaEntry
+from app.models.content import (ContentDetectionMethod, ContentDetectionResult,
+                                MediaContentType)
+from app.services.content_association_service import ContentAssociationService
 from app.models.scan import ScanStatus
 from app.models.metadata import ExternalGame, MetadataStatus
 from app.services.duplicate_detection_service import DuplicateDetectionService, DuplicateGroup, DuplicateStatus
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class DatabaseError(RuntimeError):
@@ -85,6 +88,12 @@ class DatabaseManager:
                 "platform_overridden INTEGER NOT NULL DEFAULT 0",
                 "file_hash TEXT", "hash_type TEXT", "hash_calculated_at TEXT",
                 "game_id INTEGER", "media_file_id INTEGER",
+                "content_type TEXT NOT NULL DEFAULT 'unknown'", "content_title TEXT",
+                "content_version TEXT", "content_id TEXT", "base_content_id TEXT",
+                "content_detection_method TEXT NOT NULL DEFAULT 'unknown'",
+                "content_detection_confidence REAL NOT NULL DEFAULT 0",
+                "content_parent_game_id INTEGER", "content_region TEXT",
+                "content_locked INTEGER NOT NULL DEFAULT 0",
             ):
                 self._add_column("media_entries", definition)
             self._conn.executescript("""
@@ -122,6 +131,15 @@ class DatabaseManager:
             """)
             self._add_column("games", "metadata_status TEXT NOT NULL DEFAULT 'not_requested'")
             for definition in (
+                "content_type TEXT NOT NULL DEFAULT 'unknown'", "content_title TEXT",
+                "content_version TEXT", "content_id TEXT", "base_content_id TEXT",
+                "content_detection_method TEXT NOT NULL DEFAULT 'unknown'",
+                "content_detection_confidence REAL NOT NULL DEFAULT 0",
+                "content_parent_game_id INTEGER REFERENCES games(id)", "content_region TEXT",
+                "content_locked INTEGER NOT NULL DEFAULT 0",
+            ):
+                self._add_column("media_files", definition)
+            for definition in (
                 "external_game_id TEXT", "external_platform_id TEXT", "canonical_title TEXT",
                 "release_date TEXT", "description TEXT", "metadata_last_updated TEXT",
                 "metadata_match_score REAL", "metadata_match_method TEXT", "cover_source TEXT",
@@ -139,6 +157,10 @@ class DatabaseManager:
                     UNIQUE(game_id, provider, external_game_id));
                 CREATE INDEX IF NOT EXISTS idx_games_metadata_status ON games(metadata_status);
                 CREATE INDEX IF NOT EXISTS idx_candidates_game ON metadata_match_candidates(game_id);
+                CREATE INDEX IF NOT EXISTS idx_files_content_type ON media_files(content_type);
+                CREATE INDEX IF NOT EXISTS idx_files_content_id ON media_files(content_id);
+                CREATE INDEX IF NOT EXISTS idx_files_base_content_id ON media_files(base_content_id);
+                CREATE INDEX IF NOT EXISTS idx_files_parent_game ON media_files(content_parent_game_id);
             """)
             # Interrupted work is safe to reconstruct on next startup.
             self._conn.execute("UPDATE games SET metadata_status=? WHERE metadata_status=?", (MetadataStatus.QUEUED, MetadataStatus.SEARCHING))
@@ -183,28 +205,50 @@ class DatabaseManager:
     def _upsert_entry_no_commit(self, entry: MediaEntry) -> None:
         payload: dict[str, Any] = asdict(entry); payload.pop("id", None)
         existing = self._conn.execute(
-            "SELECT platform, platform_overridden FROM media_entries WHERE drive_id=? AND full_path=?",
+            "SELECT * FROM media_entries WHERE drive_id=? AND full_path=?",
             (entry.drive_id, entry.full_path),
         ).fetchone()
         if existing and existing["platform_overridden"]:
             payload["platform"] = existing["platform"]
             payload["platform_overridden"] = 1
+        if existing and existing["content_locked"]:
+            for name in ("content_type", "content_title", "content_version", "content_id",
+                         "base_content_id", "content_detection_method", "content_detection_confidence",
+                         "content_parent_game_id", "content_region", "content_locked"):
+                payload[name] = existing[name]
         game_id, media_id = self._upsert_normalized(payload)
+        if payload.get("content_type") in {MediaContentType.UPDATE, MediaContentType.DLC, MediaContentType.ADDON}:
+            payload["content_parent_game_id"] = game_id
+            self._conn.execute("UPDATE media_files SET content_parent_game_id=? WHERE id=? AND content_locked=0", (game_id, media_id))
         payload.update(game_id=game_id, media_file_id=media_id)
         self._conn.execute("""
             INSERT INTO media_entries (category,title,original_filename,full_path,file_name,file_extension,
               file_size,modified_time,drive_letter,drive_label,drive_id,scan_date,last_seen_date,is_missing,
-              platform,platform_overridden,file_hash,hash_type,hash_calculated_at,game_id,media_file_id)
+              platform,platform_overridden,file_hash,hash_type,hash_calculated_at,game_id,media_file_id,
+              content_type,content_title,content_version,content_id,base_content_id,content_detection_method,
+              content_detection_confidence,content_parent_game_id,content_region,content_locked)
             VALUES (:category,:title,:original_filename,:full_path,:file_name,:file_extension,:file_size,
               :modified_time,:drive_letter,:drive_label,:drive_id,:scan_date,:last_seen_date,:is_missing,
-              :platform,:platform_overridden,:file_hash,:hash_type,:hash_calculated_at,:game_id,:media_file_id)
+              :platform,:platform_overridden,:file_hash,:hash_type,:hash_calculated_at,:game_id,:media_file_id,
+              :content_type,:content_title,:content_version,:content_id,:base_content_id,:content_detection_method,
+              :content_detection_confidence,:content_parent_game_id,:content_region,:content_locked)
             ON CONFLICT(drive_id,full_path) DO UPDATE SET category=excluded.category,title=excluded.title,
               original_filename=excluded.original_filename,file_name=excluded.file_name,
               file_extension=excluded.file_extension,file_size=excluded.file_size,
               modified_time=excluded.modified_time,drive_letter=excluded.drive_letter,
               drive_label=excluded.drive_label,scan_date=excluded.scan_date,last_seen_date=excluded.last_seen_date,
               is_missing=0, platform=CASE WHEN media_entries.platform_overridden=1 THEN media_entries.platform ELSE excluded.platform END,
-              game_id=excluded.game_id,media_file_id=excluded.media_file_id
+              game_id=CASE WHEN media_entries.content_locked=1 THEN media_entries.game_id ELSE excluded.game_id END,
+              media_file_id=excluded.media_file_id,
+              content_type=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_type ELSE excluded.content_type END,
+              content_title=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_title ELSE excluded.content_title END,
+              content_version=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_version ELSE excluded.content_version END,
+              content_id=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_id ELSE excluded.content_id END,
+              base_content_id=CASE WHEN media_entries.content_locked=1 THEN media_entries.base_content_id ELSE excluded.base_content_id END,
+              content_detection_method=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_detection_method ELSE excluded.content_detection_method END,
+              content_detection_confidence=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_detection_confidence ELSE excluded.content_detection_confidence END,
+              content_parent_game_id=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_parent_game_id ELSE excluded.content_parent_game_id END,
+              content_region=CASE WHEN media_entries.content_locked=1 THEN media_entries.content_region ELSE excluded.content_region END
         """, payload)
 
     def _upsert_normalized(self, item: dict[str, Any]) -> tuple[int, int]:
@@ -218,12 +262,20 @@ class DatabaseManager:
             VALUES(?,?,?,?,?,?) ON CONFLICT(title,platform) DO UPDATE SET updated_at=excluded.updated_at""",
             (item["title"], item["title"].casefold(), platform, item.get("platform_overridden", 0), timestamp, timestamp))
         game_pk = self._conn.execute("SELECT id FROM games WHERE title=? AND platform=?", (item["title"], platform)).fetchone()[0]
-        self._conn.execute("""INSERT INTO media_files(game_id,drive_id,full_path,file_name,extension,file_size,modified_time,last_seen,is_missing,file_hash,hash_type,hash_calculated_at,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(drive_id,full_path) DO UPDATE SET game_id=excluded.game_id,file_name=excluded.file_name,
+        existing_file = self._conn.execute("SELECT game_id,content_locked FROM media_files WHERE drive_id=? AND full_path=?", (drive_pk, item["full_path"])).fetchone()
+        if existing_file and existing_file["content_locked"]:
+            game_pk = existing_file["game_id"]
+        self._conn.execute("""INSERT INTO media_files(game_id,drive_id,full_path,file_name,extension,file_size,modified_time,last_seen,is_missing,file_hash,hash_type,hash_calculated_at,created_at,
+            content_type,content_title,content_version,content_id,base_content_id,content_detection_method,content_detection_confidence,content_parent_game_id,content_region,content_locked)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(drive_id,full_path) DO UPDATE SET
+            game_id=CASE WHEN media_files.content_locked=1 THEN media_files.game_id ELSE excluded.game_id END,file_name=excluded.file_name,
             extension=excluded.extension,file_size=excluded.file_size,modified_time=excluded.modified_time,last_seen=excluded.last_seen,is_missing=0""",
             (game_pk, drive_pk, item["full_path"], item["file_name"], item.get("file_extension", ""), item["file_size"],
              item["modified_time"], timestamp, item.get("is_missing", 0), item.get("file_hash"), item.get("hash_type"),
-             item.get("hash_calculated_at"), item.get("scan_date") or timestamp))
+             item.get("hash_calculated_at"), item.get("scan_date") or timestamp,
+             item.get("content_type", MediaContentType.UNKNOWN), item.get("content_title"), item.get("content_version"),
+             item.get("content_id"), item.get("base_content_id"), item.get("content_detection_method", ContentDetectionMethod.UNKNOWN),
+             item.get("content_detection_confidence", 0), item.get("content_parent_game_id"), item.get("content_region"), item.get("content_locked", 0)))
         media_pk = self._conn.execute("SELECT id FROM media_files WHERE drive_id=? AND full_path=?", (drive_pk, item["full_path"])).fetchone()[0]
         return game_pk, media_pk
 
@@ -286,14 +338,31 @@ class DatabaseManager:
             "Match prüfen": "SELECT * FROM games WHERE metadata_status='ambiguous' ORDER BY title",
             "Spiele ohne Cover": "SELECT * FROM games WHERE metadata_status IN ('matched','manual') AND COALESCE(cover_path,'')='' ORDER BY title",
             "Unvollständige Metadaten": "SELECT * FROM games WHERE metadata_status='incomplete' ORDER BY title",
+            "DLC ohne Hauptspiel": self._content_cleanup_query("content_type IN ('dlc','addon') AND content_parent_game_id IS NULL"),
+            "Update ohne Hauptspiel": self._content_cleanup_query("content_type='update' AND content_parent_game_id IS NULL"),
+            "Unbekannter Content-Typ": self._content_cleanup_query("content_type='unknown'"),
+            "Unsichere Content-Zuordnung": self._content_cleanup_query("content_type IN ('update','dlc','addon') AND content_parent_game_id IS NULL AND content_detection_confidence>0"),
+            "Manuell zu prüfen": self._content_cleanup_query("content_type IN ('update','dlc','addon') AND content_parent_game_id IS NULL"),
+            "Mehrere Base-Game-Dateien": """SELECT g.title,g.platform,COUNT(*) AS base_file_count,
+                GROUP_CONCAT(mf.file_name, ' | ') AS file_name FROM games g JOIN media_files mf ON mf.game_id=g.id
+                WHERE mf.content_type='base_game' AND mf.is_missing=0 GROUP BY g.id HAVING COUNT(*)>1 ORDER BY g.title""",
         }
         return list(self._conn.execute(queries[category]).fetchall())
+
+    @staticmethod
+    def _content_cleanup_query(predicate: str) -> str:
+        return f"""SELECT mf.file_name,g.platform,mf.content_type,mf.content_title AS possible_base_title,
+            g.title AS current_game,pg.title AS suggested_parent_game,mf.content_detection_confidence,
+            mf.content_detection_method,mf.full_path FROM media_files mf JOIN games g ON g.id=mf.game_id
+            LEFT JOIN games pg ON pg.id=mf.content_parent_game_id WHERE {predicate} ORDER BY mf.file_name"""
 
     def cleanup_counts(self) -> dict[str, int]:
         categories = ("Archive noch nicht entpackt", "Mögliche Dubletten", "Wahrscheinliche Dubletten",
                       "Bestätigte Dubletten", "Fehlende Dateien", "Unbekannte Plattformen",
                       "Unbekannte Dateiformate", "Metadaten fehlgeschlagen", "Match prüfen",
-                      "Spiele ohne Cover", "Unvollständige Metadaten")
+                      "Spiele ohne Cover", "Unvollständige Metadaten", "DLC ohne Hauptspiel",
+                      "Update ohne Hauptspiel", "Unbekannter Content-Typ", "Mehrere Base-Game-Dateien",
+                      "Unsichere Content-Zuordnung", "Manuell zu prüfen")
         return {category: len(self.cleanup_details(category)) for category in categories}
 
     def save_hash(self, media_file_id: int, digest: str, hash_type: str) -> None:
@@ -335,13 +404,84 @@ class DatabaseManager:
     def list_distinct_drives(self) -> list[sqlite3.Row]:
         return list(self._conn.execute("SELECT DISTINCT drive_id,drive_label FROM media_entries ORDER BY drive_label COLLATE NOCASE").fetchall())
 
+    def game_content_files(self, game_id: int) -> list[sqlite3.Row]:
+        return list(self._conn.execute("""SELECT * FROM media_files WHERE game_id=?
+            ORDER BY CASE content_type WHEN 'base_game' THEN 0 WHEN 'update' THEN 1
+            WHEN 'dlc' THEN 2 WHEN 'addon' THEN 2 ELSE 3 END, file_name COLLATE NOCASE""", (game_id,)))
+
+    def content_analysis_candidates(self, force: bool = False) -> list[sqlite3.Row]:
+        where = "content_locked=0" if force else "content_locked=0 AND content_type='unknown'"
+        return list(self._conn.execute(f"SELECT * FROM media_files WHERE {where} ORDER BY id"))
+
+    def _association_games(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self._conn.execute("""SELECT g.*,
+            EXISTS(SELECT 1 FROM media_files b WHERE b.game_id=g.id AND b.content_type='base_game') AS has_base,
+            (SELECT b.content_id FROM media_files b WHERE b.game_id=g.id AND b.content_type='base_game' AND b.content_id IS NOT NULL LIMIT 1) AS content_id,
+            (SELECT b.base_content_id FROM media_files b WHERE b.game_id=g.id AND b.content_type='base_game' AND b.base_content_id IS NOT NULL LIMIT 1) AS base_content_id
+            FROM games g""")]
+
+    def apply_content_detection(self, media_file_id: int, result: ContentDetectionResult) -> None:
+        row = self._conn.execute("""SELECT mf.*,g.platform,g.title AS game_title
+            FROM media_files mf JOIN games g ON g.id=mf.game_id WHERE mf.id=?""", (media_file_id,)).fetchone()
+        if not row or row["content_locked"]:
+            if row: LOGGER.info("Content-Lock respektiert: media=%s", media_file_id)
+            return
+        association = ContentAssociationService().associate(result, row["platform"], self._association_games(), dict(row))
+        parent = association.parent_game_id
+        # Base files remain on their current Game. Supplemental content moves only
+        # after a unique conservative association.
+        new_game = row["game_id"] if result.content_type in {MediaContentType.BASE_GAME, MediaContentType.DEMO, MediaContentType.UNKNOWN} or parent is None else parent
+        timestamp = now_iso()
+        with self._conn:
+            self._conn.execute("""UPDATE media_files SET game_id=?,content_type=?,content_title=?,content_version=?,
+                content_id=?,base_content_id=?,content_detection_method=?,content_detection_confidence=?,
+                content_parent_game_id=?,content_region=? WHERE id=?""", (new_game, result.content_type,
+                result.title, result.version, result.content_id, result.base_content_id, result.method,
+                result.confidence, parent, result.region, media_file_id))
+            self._conn.execute("""UPDATE media_entries SET game_id=?,title=CASE WHEN ? IS NOT NULL THEN ? ELSE title END,
+                content_type=?,content_title=?,content_version=?,content_id=?,base_content_id=?,content_detection_method=?,
+                content_detection_confidence=?,content_parent_game_id=?,content_region=? WHERE media_file_id=?""",
+                (new_game, parent, result.title, result.content_type, result.title, result.version, result.content_id,
+                 result.base_content_id, result.method, result.confidence, parent, result.region, media_file_id))
+            self._delete_empty_legacy_game(row["game_id"], new_game, timestamp)
+
+    def _delete_empty_legacy_game(self, old_game_id: int, new_game_id: int, timestamp: str) -> None:
+        if old_game_id == new_game_id:
+            return
+        game = self._conn.execute("SELECT * FROM games WHERE id=?", (old_game_id,)).fetchone()
+        if not game or self._conn.execute("SELECT 1 FROM media_files WHERE game_id=?", (old_game_id,)).fetchone():
+            return
+        relevant = (game["metadata_locked"] or game["external_game_id"] or game["cover_path"] or
+                    game["metadata_status"] not in {"not_requested", "failed"})
+        if relevant:
+            LOGGER.info("Leeres Legacy-Game %s wegen relevanter Metadaten beibehalten", old_game_id)
+            return
+        self._conn.execute("DELETE FROM games WHERE id=?", (old_game_id,))
+        LOGGER.info("Leeres, ungelocktes Legacy-Content-Game %s konsolidiert", old_game_id)
+
+    def set_manual_content(self, media_file_id: int, content_type: MediaContentType,
+                           parent_game_id: int | None, title: str | None = None) -> None:
+        row = self._conn.execute("SELECT game_id FROM media_files WHERE id=?", (media_file_id,)).fetchone()
+        if not row: raise DatabaseError("MediaFile nicht gefunden")
+        game_id = parent_game_id or row["game_id"]
+        with self._conn:
+            self._conn.execute("""UPDATE media_files SET game_id=?,content_type=?,content_title=?,
+                content_parent_game_id=?,content_detection_method='manual',content_detection_confidence=1,content_locked=1 WHERE id=?""",
+                (game_id, content_type, title, parent_game_id, media_file_id))
+            self._conn.execute("""UPDATE media_entries SET game_id=?,content_type=?,content_title=?,
+                content_parent_game_id=?,content_detection_method='manual',content_detection_confidence=1,content_locked=1 WHERE media_file_id=?""",
+                (game_id, content_type, title, parent_game_id, media_file_id))
+        LOGGER.info("Manuelle Zuordnung / Content-Lock: media=%s parent=%s", media_file_id, parent_game_id)
+
     def enqueue_metadata(self, game_ids: Iterable[int] | None = None, force: bool = False) -> int:
         params: list[Any] = []
-        where = "metadata_status='not_requested'"
+        base_filter = """EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type='base_game')
+            OR NOT EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type<>'unknown')"""
+        where = f"metadata_status='not_requested' AND ({base_filter})"
         if game_ids is not None:
             ids = list(game_ids)
             if not ids: return 0
-            where = f"id IN ({','.join('?' for _ in ids)})"; params.extend(ids)
+            where = f"id IN ({','.join('?' for _ in ids)}) AND ({base_filter})"; params.extend(ids)
             # A durable lock, not the transient queue status, protects user decisions.
             if not force: where += " AND metadata_locked=0"
             else: where += " AND (metadata_locked=0 OR external_game_id IS NOT NULL)"
@@ -349,7 +489,9 @@ class DatabaseManager:
         self._conn.commit(); return cursor.rowcount
 
     def queued_games(self) -> list[sqlite3.Row]:
-        return list(self._conn.execute("SELECT * FROM games WHERE metadata_status=? ORDER BY id", (MetadataStatus.QUEUED,)))
+        return list(self._conn.execute("""SELECT * FROM games WHERE metadata_status=? AND
+            (EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type='base_game')
+             OR NOT EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type<>'unknown')) ORDER BY id""", (MetadataStatus.QUEUED,)))
 
     def set_metadata_status(self, game_id: int, status: MetadataStatus) -> None:
         self._conn.execute("UPDATE games SET metadata_status=?, updated_at=? WHERE id=?", (status, now_iso(), game_id)); self._conn.commit()

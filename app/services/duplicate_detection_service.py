@@ -28,6 +28,9 @@ class DuplicateDetectionService:
         left_hash, right_hash = left.get("file_hash"), right.get("file_hash")
         if left_hash and right_hash and left_hash == right_hash and left.get("hash_type") == right.get("hash_type"):
             return DuplicateStatus.CONFIRMED
+        left_type, right_type = left.get("content_type", "unknown"), right.get("content_type", "unknown")
+        if left_type != "unknown" and right_type != "unknown" and left_type != right_type:
+            return DuplicateStatus.NONE
         same_title = str(left.get("title", "")).casefold() == str(right.get("title", "")).casefold()
         same_platform = left.get("platform") == right.get("platform")
         if not (same_title and same_platform):
@@ -63,7 +66,9 @@ class DuplicateDetectionService:
         title_buckets: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
         for entry in available:
             if id(entry) not in confirmed_ids:
-                key = (str(entry.get("title", "")).casefold(), str(entry.get("platform", "Unknown")))
+                content_type = str(entry.get("content_type") or "unknown")
+                key = (str(entry.get("title", "")).casefold(), str(entry.get("platform", "Unknown")),
+                       content_type if content_type != "unknown" else "unknown")
                 title_buckets.setdefault(key, []).append(entry)
         for bucket in title_buckets.values():
             if len(bucket) < 2:

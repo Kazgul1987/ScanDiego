@@ -14,6 +14,7 @@ from app.models.game_entry import MediaEntry
 from app.models.scan import ScanStatus
 from app.services.platform_detection_service import PlatformDetectionService
 from app.services.title_normalization_service import TitleNormalizationService
+from app.services.content_detection_service import ContentDetectionService
 from app.utils.date_utils import now_iso, ts_to_iso
 
 LOGGER = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ class ScannerWorker(QObject):
         self._cancelled = False
         self._titles = TitleNormalizationService()
         self._platforms = PlatformDetectionService()
+        self._content = ContentDetectionService()
 
     @Slot()
     def run(self) -> None:
@@ -66,10 +68,17 @@ class ScannerWorker(QObject):
                                         suffix = child.suffix.lower()
                                         if suffix in SUPPORTED_MEDIA_EXTENSIONS:
                                             has_media = True; stat = child.stat(); timestamp = now_iso()
-                                            batch.append(MediaEntry(None, category, self._titles.normalize(child.name), child.name,
+                                            content = self._content.detect(child)
+                                            library_title = self._titles.normalize(content.title or child.name)
+                                            batch.append(MediaEntry(None, category, library_title, child.name,
                                                 str(child.resolve()), child.name, suffix, stat.st_size, ts_to_iso(stat.st_mtime),
                                                 drive.letter, drive.label, drive.volume_serial, timestamp, timestamp, 0,
-                                                str(self._platforms.detect(child))))
+                                                str(self._platforms.detect(child)), content_type=content.content_type,
+                                                content_title=content.title, content_version=content.version,
+                                                content_id=content.content_id, base_content_id=content.base_content_id,
+                                                content_detection_method=content.method,
+                                                content_detection_confidence=content.confidence,
+                                                content_region=content.region))
                                             found += 1; drive_found += 1
                                             if len(batch) >= SCAN_BATCH_SIZE: db.upsert_entries(batch); batch.clear()
                                         elif suffix in ARCHIVE_EXTENSIONS: has_archive = True
