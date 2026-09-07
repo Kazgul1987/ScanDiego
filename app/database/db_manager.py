@@ -9,10 +9,11 @@ from typing import Any, Iterable
 
 from app.models.game_entry import MediaEntry
 from app.models.scan import ScanStatus
+from app.services.duplicate_detection_service import DuplicateDetectionService, DuplicateGroup, DuplicateStatus
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class DatabaseError(RuntimeError):
@@ -64,6 +65,21 @@ class DatabaseManager:
                     UNIQUE(drive_id, folder_path));
             """)
             for definition in (
+                "last_seen TEXT", "scan_id TEXT", "is_active INTEGER NOT NULL DEFAULT 1",
+            ):
+                self._add_column("archive_only_dirs", definition)
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS unknown_media_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    drive_id TEXT NOT NULL, full_path TEXT NOT NULL, file_name TEXT NOT NULL,
+                    extension TEXT NOT NULL, file_size INTEGER NOT NULL, last_seen TEXT NOT NULL,
+                    scan_id TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1,
+                    UNIQUE(drive_id, full_path));
+                CREATE INDEX IF NOT EXISTS idx_unknown_drive_active
+                    ON unknown_media_candidates(drive_id, is_active);
+            """)
+            self._conn.execute("UPDATE archive_only_dirs SET last_seen=COALESCE(last_seen, scan_date)")
+            for definition in (
                 "platform TEXT NOT NULL DEFAULT 'Unknown'",
                 "platform_overridden INTEGER NOT NULL DEFAULT 0",
                 "file_hash TEXT", "hash_type TEXT", "hash_calculated_at TEXT",
@@ -79,6 +95,7 @@ class DatabaseManager:
                     platform TEXT NOT NULL DEFAULT 'Unknown', platform_overridden INTEGER NOT NULL DEFAULT 0,
                     release_year INTEGER, publisher TEXT, developer TEXT, region TEXT, edition TEXT,
                     cover_path TEXT, cover_url TEXT, metadata_source TEXT,
+                    metadata_status TEXT NOT NULL DEFAULT 'not_requested',
                     created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
                     UNIQUE(title, platform));
                 CREATE TABLE IF NOT EXISTS media_files (
@@ -102,6 +119,7 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_scan_drive ON scan_runs(drive_volume_serial, started_at);
                 CREATE INDEX IF NOT EXISTS idx_archive_only_drive_id ON archive_only_dirs(drive_id);
             """)
+            self._add_column("games", "metadata_status TEXT NOT NULL DEFAULT 'not_requested'")
             self._backfill_normalized_tables()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         LOGGER.info("Datenbankschema Version %s ist bereit", SCHEMA_VERSION)
@@ -199,19 +217,58 @@ class DatabaseManager:
         """Legacy API; callers must explicitly use safe scan completion instead."""
         raise DatabaseError("Missing status requires a completed scan status")
 
-    def upsert_archive_only_dir(self, drive_id: str, folder_path: str, scan_date: str) -> None:
-        self._conn.execute("""INSERT INTO archive_only_dirs(drive_id,folder_path,scan_date) VALUES(?,?,?)
-            ON CONFLICT(drive_id,folder_path) DO UPDATE SET scan_date=excluded.scan_date""", (drive_id, folder_path, scan_date))
+    def upsert_archive_only_dir(self, drive_id: str, folder_path: str, scan_date: str,
+                                scan_id: str | None = None) -> None:
+        self._conn.execute("""INSERT INTO archive_only_dirs(drive_id,folder_path,scan_date,last_seen,scan_id,is_active)
+            VALUES(?,?,?,?,?,1) ON CONFLICT(drive_id,folder_path) DO UPDATE SET
+            scan_date=excluded.scan_date,last_seen=excluded.last_seen,scan_id=excluded.scan_id,is_active=1""",
+            (drive_id, folder_path, scan_date, scan_date, scan_id))
+
+    def upsert_unknown_candidate(self, drive_id: str, full_path: str, file_name: str,
+                                 extension: str, file_size: int, seen_at: str, scan_id: str) -> None:
+        self._conn.execute("""INSERT INTO unknown_media_candidates
+            (drive_id,full_path,file_name,extension,file_size,last_seen,scan_id,is_active)
+            VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(drive_id,full_path) DO UPDATE SET
+            file_name=excluded.file_name,extension=excluded.extension,file_size=excluded.file_size,
+            last_seen=excluded.last_seen,scan_id=excluded.scan_id,is_active=1""",
+            (drive_id, full_path, file_name, extension, file_size, seen_at, scan_id))
+
+    def finalize_auxiliary_scan(self, drive_id: str, scan_id: str, status: ScanStatus,
+                                archive_tracking_enabled: bool = True) -> None:
+        """Deactivate stale scan findings only when traversal was completely reliable."""
+        if status is not ScanStatus.COMPLETED:
+            LOGGER.info("Bereinigung zusätzlicher Scanergebnisse übersprungen: %s", status)
+            return
+        if archive_tracking_enabled:
+            self._conn.execute("UPDATE archive_only_dirs SET is_active=0 WHERE drive_id=? AND COALESCE(scan_id,'')<>?", (drive_id, scan_id))
+        self._conn.execute("UPDATE unknown_media_candidates SET is_active=0 WHERE drive_id=? AND scan_id<>?", (drive_id, scan_id))
+
+    def duplicate_groups(self, status: DuplicateStatus | None = None) -> list[DuplicateGroup]:
+        groups = DuplicateDetectionService().groups([dict(row) for row in self.list_entries()])
+        return [group for group in groups if status is None or group.status is status]
+
+    def cleanup_details(self, category: str) -> list[Any]:
+        duplicate_categories = {
+            "Mögliche Dubletten": DuplicateStatus.POSSIBLE,
+            "Wahrscheinliche Dubletten": DuplicateStatus.PROBABLE,
+            "Bestätigte Dubletten": DuplicateStatus.CONFIRMED,
+        }
+        if category in duplicate_categories:
+            return self.duplicate_groups(duplicate_categories[category])
+        queries = {
+            "Archive noch nicht entpackt": "SELECT * FROM archive_only_dirs WHERE is_active=1 ORDER BY folder_path",
+            "Fehlende Dateien": "SELECT * FROM media_entries WHERE is_missing=1 ORDER BY title",
+            "Unbekannte Plattformen": "SELECT * FROM media_entries WHERE platform='Unknown' ORDER BY title",
+            "Unbekannte Dateiformate": "SELECT * FROM unknown_media_candidates WHERE is_active=1 ORDER BY full_path",
+            "Spiele ohne Metadaten": "SELECT * FROM games WHERE metadata_status IN ('incomplete','failed') ORDER BY title",
+        }
+        return list(self._conn.execute(queries[category]).fetchall())
 
     def cleanup_counts(self) -> dict[str, int]:
-        def count(sql: str) -> int: return int(self._conn.execute(sql).fetchone()[0])
-        return {"Archive noch nicht entpackt": count("SELECT COUNT(*) FROM archive_only_dirs"),
-                "Mögliche Dubletten": count("SELECT COUNT(*) FROM (SELECT title,platform,file_size FROM media_entries GROUP BY title,platform,file_size HAVING COUNT(*)>1)"),
-                "Bestätigte Dubletten": count("SELECT COUNT(*) FROM (SELECT file_hash FROM media_entries WHERE file_hash IS NOT NULL GROUP BY file_hash HAVING COUNT(*)>1)"),
-                "Fehlende Dateien": count("SELECT COUNT(*) FROM media_entries WHERE is_missing=1"),
-                "Unbekannte Plattformen": count("SELECT COUNT(*) FROM media_entries WHERE platform='Unknown'"),
-                "Unbekannte Dateiformate": 0,
-                "Spiele ohne Metadaten": count("SELECT COUNT(*) FROM games WHERE metadata_source IS NULL")}
+        categories = ("Archive noch nicht entpackt", "Mögliche Dubletten", "Wahrscheinliche Dubletten",
+                      "Bestätigte Dubletten", "Fehlende Dateien", "Unbekannte Plattformen",
+                      "Unbekannte Dateiformate", "Spiele ohne Metadaten")
+        return {category: len(self.cleanup_details(category)) for category in categories}
 
     def save_hash(self, media_file_id: int, digest: str, hash_type: str) -> None:
         calculated_at = now_iso()
