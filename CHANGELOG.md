@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.9.3 – 2026-09-07
+
+- Provider credentials now persist across application updates.
+- IGDB Client ID is stored in the OS credential store as well.
+- Legacy provider credentials are migrated out of `settings.json`.
+- Manual removal of DLC/update parent assignments is now durable.
+- Removed content assignments are protected from immediate automatic reassociation.
+
 ## 0.9.2 – 2026-09-07
 
 - Bulk-Metadatenabruf wiederholt zuvor fehlgeschlagene Lookups und prüft vorher die IGDB-Konfiguration.

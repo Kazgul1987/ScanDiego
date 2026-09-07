@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -30,14 +29,20 @@ class MetadataSettings:
         values = {k: v for k, v in raw.items() if k in allowed}
         store = credential_store or CredentialStore()
         result = cls(**values)
+        credentials = ("igdb_client_id", "igdb_client_secret", "steamgriddb_api_key")
         migrated = False
-        for name in ("igdb_client_secret", "steamgriddb_api_key"):
+        for name in credentials:
             legacy = raw.get(name)
-            if legacy and store.set(name, legacy): raw.pop(name, None); migrated = True
-        # Environment variables are preferable for secrets and never persisted.
-        result.igdb_client_id = os.getenv("SCANDIEGO_IGDB_CLIENT_ID", result.igdb_client_id)
-        result.igdb_client_secret = store.get("igdb_client_secret") or (result.igdb_client_secret if not migrated else "")
-        result.steamgriddb_api_key = store.get("steamgriddb_api_key") or (result.steamgriddb_api_key if not migrated else "")
+            stored = store.get(name)
+            if legacy and not stored:
+                if store.set(name, legacy):
+                    stored = store.get(name) or legacy
+                    raw.pop(name, None)
+                    migrated = True
+            elif legacy and stored:
+                raw.pop(name, None)
+                migrated = True
+            setattr(result, name, stored or legacy or "")
         if migrated:
             path.write_text(json.dumps(raw, indent=2), "utf-8")
         return result
@@ -46,8 +51,12 @@ class MetadataSettings:
         path = path or get_data_dir() / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         store = credential_store or CredentialStore()
-        secrets_ok = all(store.set(name, getattr(self, name)) for name in ("igdb_client_secret", "steamgriddb_api_key"))
+        credentials = ("igdb_client_id", "igdb_client_secret", "steamgriddb_api_key")
+        credentials_ok = all(store.set(name, getattr(self, name)) for name in credentials)
         payload = asdict(self)
-        payload.pop("igdb_client_secret"); payload.pop("steamgriddb_api_key")
+        for name in credentials:
+            payload.pop(name)
         path.write_text(json.dumps(payload, indent=2), "utf-8")
-        if not secrets_ok: raise RuntimeError("Credential Manager nicht verfügbar; Secrets wurden nicht gespeichert")
+        if not credentials_ok:
+            raise RuntimeError("Windows Credential Manager ist nicht verfügbar. "
+                               "Die Provider-Zugangsdaten konnten nicht dauerhaft gespeichert werden.")

@@ -1,4 +1,4 @@
-# ScanDiego 0.9.2
+# ScanDiego 0.9.3
 
 ScanDiego ist ein lokaler Game-Collection-Manager für Windows (Python, PySide6 und SQLite). Die Anwendung erkennt externe Datenträger anhand ihrer **Volume Serial Number**, scannt deren Verzeichnisse `Games` und `ROMs` im Hintergrund und bewahrt den ursprünglichen Dateinamen neben einem lesbaren Titel auf.
 
@@ -41,7 +41,9 @@ die allgemeine Titel-Normalisierung. Titel und Plattform müssen eindeutig über
 technische Base-ID hat Vorrang. Unsichere oder elternlose Funde bleiben unzugeordnet und erscheinen im
 Aufräumen. Dort kann ein Hauptspiel aus plattform- und titelpriorisierten Base-Kandidaten gesucht und
 manuell zugeordnet werden. Manuelle Zuordnungen werden dauerhaft gesperrt und können gezielt wieder
-gelöst werden, ohne den erkannten Content-Typ zu löschen.
+gelöst werden, ohne den erkannten Content-Typ zu löschen. Gelöste Zusatzinhalte werden einem neutralen
+Game-Datensatz zugewiesen und bleiben gesperrt, damit ein automatischer Abgleich die Benutzerentscheidung
+nicht rückgängig macht.
 
 Der austauschbare Switch-Parser unterstützt `.nsp`, `.xci`, `.nsz` und `.xcz`, liest höchstens 64 KiB
 und verarbeitet ausschließlich offen vorliegende Metadaten. Zusätzlich werden eindeutige 16-stellige
@@ -110,10 +112,11 @@ Treffer nicht übernommen und die bestätigte Artwork-ID für spätere Aktualisi
 Cover gehören nicht zur Metadaten-Vollständigkeit: `incomplete` bedeutet, dass trotz Match weniger
 als drei der Angaben Titel, Veröffentlichungsdatum/-jahr, Publisher und Developer vorhanden sind.
 
-IGDB-Secret und SteamGridDB-Key werden über `keyring` im Credential Manager gespeichert;
+IGDB-Client-ID, IGDB-Secret und SteamGridDB-Key werden über `keyring` im Credential Manager gespeichert;
 Umgebungsvariablen haben Vorrang. Alte Klartextwerte werden nur nach erfolgreicher Übernahme
-entfernt. Ohne verfügbares Keyring-Backend bleibt die App offline nutzbar und speichert kein Secret
-im Klartext. Die Provider-Auswahl im Einstellungsdialog wird von den Workern über eine Factory
+entfernt. Ohne verfügbares Keyring-Backend bleibt die App offline nutzbar und speichert keine
+Provider-Zugangsdaten im Klartext. Dadurch bleibt die Provider-Konfiguration auch beim Austausch des
+portablen Programmordners erhalten. Die Provider-Auswahl im Einstellungsdialog wird von den Workern über eine Factory
 verwendet. Metadata- und Cover-Queues sind getrennt sichtbar und können durch ihre Worker
 abgebrochen werden; MetadataQueueService unterstützt außerdem Pause und Fortsetzen.
 

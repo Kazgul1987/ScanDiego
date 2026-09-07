@@ -46,11 +46,49 @@ def test_review_search_apply_no_match_and_replace(tmp_path):
 
 def test_credentials_keyring_environment_and_plaintext_migration(tmp_path,monkeypatch):
     keys=Keys(); store=CredentialStore(keys); store.set("igdb_client_secret","saved"); assert store.get("igdb_client_secret")=="saved"
+    store.set("igdb_client_id", "stored-client"); assert store.get("igdb_client_id") == "stored-client"
     monkeypatch.setenv("SCANDIEGO_IGDB_CLIENT_SECRET","environment"); assert store.get("igdb_client_secret")=="environment"
-    path=tmp_path/"settings.json"; path.write_text(json.dumps({"igdb_client_secret":"old","steamgriddb_api_key":"grid"}))
+    monkeypatch.setenv("SCANDIEGO_IGDB_CLIENT_ID", "environment-client"); assert store.get("igdb_client_id") == "environment-client"
+    path=tmp_path/"settings.json"; path.write_text(json.dumps({"igdb_client_id":"old-client","igdb_client_secret":"old","steamgriddb_api_key":"grid","automatic_covers":True}))
     monkeypatch.delenv("SCANDIEGO_IGDB_CLIENT_SECRET"); loaded=MetadataSettings.load(path,store)
-    assert loaded.igdb_client_secret=="old" and "igdb_client_secret" not in path.read_text()
-    loaded.save(path,store); assert "steamgriddb_api_key" not in path.read_text()
+    monkeypatch.delenv("SCANDIEGO_IGDB_CLIENT_ID")
+    assert loaded.igdb_client_id == "environment-client" and loaded.igdb_client_secret == "saved"
+    persisted = json.loads(path.read_text())
+    assert not {"igdb_client_id", "igdb_client_secret", "steamgriddb_api_key"} & persisted.keys()
+    assert persisted["automatic_covers"] is True
+
+
+def test_provider_credentials_survive_replaced_settings_directory(tmp_path):
+    keys = Keys()
+    store = CredentialStore(keys)
+    first_path = tmp_path / "old-program" / "settings.json"
+    settings = MetadataSettings(igdb_client_id="client123", igdb_client_secret="secret123",
+                                steamgriddb_api_key="steam123")
+    settings.save(first_path, store)
+    assert not {"igdb_client_id", "igdb_client_secret", "steamgriddb_api_key"} & json.loads(first_path.read_text()).keys()
+    assert MetadataSettings.load(first_path, store) == settings
+
+    new_path = tmp_path / "new-program" / "settings.json"
+    new_path.parent.mkdir()
+    new_path.write_text(json.dumps({"automatic_covers": False}))
+    loaded = MetadataSettings.load(new_path, store)
+    assert (loaded.igdb_client_id, loaded.igdb_client_secret, loaded.steamgriddb_api_key) == (
+        "client123", "secret123", "steam123")
+    assert loaded.automatic_covers is False
+
+
+def test_all_legacy_provider_credentials_are_migrated(tmp_path):
+    keys = Keys()
+    store = CredentialStore(keys)
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"igdb_client_id": "old-client", "igdb_client_secret": "old-secret",
+                                "steamgriddb_api_key": "old-key", "automatic_covers": True}))
+    loaded = MetadataSettings.load(path, store)
+    assert (loaded.igdb_client_id, loaded.igdb_client_secret, loaded.steamgriddb_api_key) == (
+        "old-client", "old-secret", "old-key")
+    assert [store.get(name) for name in ("igdb_client_id", "igdb_client_secret", "steamgriddb_api_key")] == [
+        "old-client", "old-secret", "old-key"]
+    assert json.loads(path.read_text()) == {"automatic_covers": True}
 
 def test_missing_keyring_is_safe(tmp_path):
     settings=MetadataSettings(igdb_client_secret="secret")

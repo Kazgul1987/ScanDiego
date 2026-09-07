@@ -64,7 +64,8 @@ def test_startup_repairs_existing_locked_self_parent_without_unlocking(tmp_path)
 
 
 def test_manual_parent_assignment_lock_and_removal(tmp_path):
-    db = DatabaseManager(tmp_path / "db.sqlite")
+    path = tmp_path / "db.sqlite"
+    db = DatabaseManager(path)
     db.upsert_entry(media("/Base.nsp", MediaContentType.BASE_GAME, "Base"))
     db.upsert_entry(media("/DLC.nsp", MediaContentType.DLC, "DLC Holder"))
     base_id = db._conn.execute("SELECT id FROM games WHERE title='Base'").fetchone()[0]
@@ -75,8 +76,19 @@ def test_manual_parent_assignment_lock_and_removal(tmp_path):
     db.reconcile_content_associations()
     assert db._conn.execute("SELECT content_parent_game_id FROM media_files WHERE id=?", (media_id,)).fetchone()[0] == base_id
     db.remove_manual_content_parent(media_id)
-    removed = db._conn.execute("SELECT content_parent_game_id,content_locked,content_type FROM media_files WHERE id=?", (media_id,)).fetchone()
-    assert tuple(removed) == (None, 0, "dlc")
+    removed = db._conn.execute("SELECT game_id,content_parent_game_id,content_locked,content_type FROM media_files WHERE id=?", (media_id,)).fetchone()
+    assert removed["game_id"] != base_id
+    assert tuple(removed)[1:] == (None, 1, "dlc")
+    projection = db._conn.execute("SELECT game_id,content_parent_game_id,content_locked,content_type FROM media_entries WHERE media_file_id=?", (media_id,)).fetchone()
+    assert tuple(projection) == tuple(removed)
+    db.reconcile_content_associations()
+    reconciled = db._conn.execute("SELECT game_id,content_parent_game_id,content_locked FROM media_files WHERE id=?", (media_id,)).fetchone()
+    assert tuple(reconciled) == (removed["game_id"], None, 1)
+    db.close()
+
+    reopened = DatabaseManager(path)
+    persisted = reopened._conn.execute("SELECT game_id,content_parent_game_id,content_locked FROM media_files WHERE id=?", (media_id,)).fetchone()
+    assert tuple(persisted) == (removed["game_id"], None, 1)
 
 
 def test_manual_self_parent_without_base_is_rejected(tmp_path):

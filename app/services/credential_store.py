@@ -3,7 +3,8 @@ import logging, os
 
 LOGGER = logging.getLogger(__name__)
 SERVICE = "ScanDiego"
-ENV = {"igdb_client_secret": "SCANDIEGO_IGDB_CLIENT_SECRET",
+ENV = {"igdb_client_id": "SCANDIEGO_IGDB_CLIENT_ID",
+       "igdb_client_secret": "SCANDIEGO_IGDB_CLIENT_SECRET",
        "steamgriddb_api_key": "SCANDIEGO_STEAMGRIDDB_API_KEY"}
 
 class CredentialStore:
