@@ -6,3 +6,5 @@ data/*.db*
 logs/*.log*
 dist/
 build/
+data/settings.json
+data/covers/

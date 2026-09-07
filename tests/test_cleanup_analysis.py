@@ -75,11 +75,13 @@ def test_every_cleanup_count_uses_its_detail_analysis(tmp_path):
     assert set(counts) == {
         "Archive noch nicht entpackt", "Mögliche Dubletten", "Wahrscheinliche Dubletten",
         "Bestätigte Dubletten", "Fehlende Dateien", "Unbekannte Plattformen",
-        "Unbekannte Dateiformate", "Spiele ohne Metadaten",
+        "Unbekannte Dateiformate", "Metadaten fehlgeschlagen", "Match prüfen",
+        "Spiele ohne Cover", "Unvollständige Metadaten",
     }
     assert all(count == len(db.cleanup_details(category)) for category, count in counts.items())
     # The default means no provider was requested, not that metadata retrieval failed.
-    assert counts["Spiele ohne Metadaten"] == 0
+    assert counts["Metadaten fehlgeschlagen"] == 0
+    assert counts["Unvollständige Metadaten"] == 0
     db._conn.execute("UPDATE games SET metadata_status='failed'"); db.commit()
-    assert db.cleanup_counts()["Spiele ohne Metadaten"] == 1
+    assert db.cleanup_counts()["Metadaten fehlgeschlagen"] == 1
     db.close()

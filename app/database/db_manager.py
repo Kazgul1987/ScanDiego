@@ -9,11 +9,12 @@ from typing import Any, Iterable
 
 from app.models.game_entry import MediaEntry
 from app.models.scan import ScanStatus
+from app.models.metadata import ExternalGame, MetadataStatus
 from app.services.duplicate_detection_service import DuplicateDetectionService, DuplicateGroup, DuplicateStatus
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class DatabaseError(RuntimeError):
@@ -120,6 +121,25 @@ class DatabaseManager:
                 CREATE INDEX IF NOT EXISTS idx_archive_only_drive_id ON archive_only_dirs(drive_id);
             """)
             self._add_column("games", "metadata_status TEXT NOT NULL DEFAULT 'not_requested'")
+            for definition in (
+                "external_game_id TEXT", "external_platform_id TEXT", "canonical_title TEXT",
+                "release_date TEXT", "description TEXT", "metadata_last_updated TEXT",
+                "metadata_match_score REAL", "metadata_match_method TEXT", "cover_source TEXT",
+            ):
+                self._add_column("games", definition)
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS metadata_match_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    game_id INTEGER NOT NULL REFERENCES games(id) ON DELETE CASCADE,
+                    provider TEXT NOT NULL, external_game_id TEXT NOT NULL,
+                    title TEXT NOT NULL, platform TEXT, release_date TEXT,
+                    release_year INTEGER, score REAL NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(game_id, provider, external_game_id));
+                CREATE INDEX IF NOT EXISTS idx_games_metadata_status ON games(metadata_status);
+                CREATE INDEX IF NOT EXISTS idx_candidates_game ON metadata_match_candidates(game_id);
+            """)
+            # Interrupted work is safe to reconstruct on next startup.
+            self._conn.execute("UPDATE games SET metadata_status=? WHERE metadata_status=?", (MetadataStatus.QUEUED, MetadataStatus.SEARCHING))
             self._backfill_normalized_tables()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         LOGGER.info("Datenbankschema Version %s ist bereit", SCHEMA_VERSION)
@@ -260,14 +280,18 @@ class DatabaseManager:
             "Fehlende Dateien": "SELECT * FROM media_entries WHERE is_missing=1 ORDER BY title",
             "Unbekannte Plattformen": "SELECT * FROM media_entries WHERE platform='Unknown' ORDER BY title",
             "Unbekannte Dateiformate": "SELECT * FROM unknown_media_candidates WHERE is_active=1 ORDER BY full_path",
-            "Spiele ohne Metadaten": "SELECT * FROM games WHERE metadata_status IN ('incomplete','failed') ORDER BY title",
+            "Metadaten fehlgeschlagen": "SELECT * FROM games WHERE metadata_status='failed' ORDER BY title",
+            "Match prüfen": "SELECT * FROM games WHERE metadata_status='ambiguous' ORDER BY title",
+            "Spiele ohne Cover": "SELECT * FROM games WHERE metadata_status IN ('matched','manual') AND COALESCE(cover_path,'')='' ORDER BY title",
+            "Unvollständige Metadaten": "SELECT * FROM games WHERE metadata_status='incomplete' ORDER BY title",
         }
         return list(self._conn.execute(queries[category]).fetchall())
 
     def cleanup_counts(self) -> dict[str, int]:
         categories = ("Archive noch nicht entpackt", "Mögliche Dubletten", "Wahrscheinliche Dubletten",
                       "Bestätigte Dubletten", "Fehlende Dateien", "Unbekannte Plattformen",
-                      "Unbekannte Dateiformate", "Spiele ohne Metadaten")
+                      "Unbekannte Dateiformate", "Metadaten fehlgeschlagen", "Match prüfen",
+                      "Spiele ohne Cover", "Unvollständige Metadaten")
         return {category: len(self.cleanup_details(category)) for category in categories}
 
     def save_hash(self, media_file_id: int, digest: str, hash_type: str) -> None:
@@ -291,13 +315,78 @@ class DatabaseManager:
     def list_entries(self, search: str = "", drive_filter: str = "", platform_filter: str = "") -> list[sqlite3.Row]:
         clauses, params = [], []
         if search.strip():
-            clauses.append("(title LIKE ? OR file_name LIKE ? OR full_path LIKE ?)"); token=f"%{search.strip()}%"; params += [token]*3
-        if drive_filter.strip(): clauses.append("drive_id = ?"); params.append(drive_filter)
-        if platform_filter.strip(): clauses.append("platform = ?"); params.append(platform_filter)
+            clauses.append("(media_entries.title LIKE ? OR file_name LIKE ? OR full_path LIKE ?)"); token=f"%{search.strip()}%"; params += [token]*3
+        if drive_filter.strip(): clauses.append("media_entries.drive_id = ?"); params.append(drive_filter)
+        if platform_filter.strip(): clauses.append("media_entries.platform = ?"); params.append(platform_filter)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        try: return list(self._conn.execute(f"SELECT * FROM media_entries {where} ORDER BY title COLLATE NOCASE", params).fetchall())
+        try: return list(self._conn.execute(f"""SELECT media_entries.*,
+            games.canonical_title, games.release_year AS metadata_release_year, games.publisher,
+            games.developer, games.description, games.cover_path, games.cover_source,
+            games.metadata_source, games.metadata_status, games.metadata_match_score,
+            games.metadata_match_method, games.external_game_id
+            FROM media_entries LEFT JOIN games ON games.id=media_entries.game_id
+            {where} ORDER BY media_entries.title COLLATE NOCASE""", params).fetchall())
         except sqlite3.Error as exc:
             LOGGER.exception("Datenbankabfrage fehlgeschlagen"); raise DatabaseError(str(exc)) from exc
 
     def list_distinct_drives(self) -> list[sqlite3.Row]:
         return list(self._conn.execute("SELECT DISTINCT drive_id,drive_label FROM media_entries ORDER BY drive_label COLLATE NOCASE").fetchall())
+
+    def enqueue_metadata(self, game_ids: Iterable[int] | None = None, force: bool = False) -> int:
+        params: list[Any] = []
+        where = "metadata_status='not_requested'"
+        if game_ids is not None:
+            ids = list(game_ids)
+            if not ids: return 0
+            where = f"id IN ({','.join('?' for _ in ids)})"; params.extend(ids)
+            if not force: where += " AND metadata_status!='manual'"
+        cursor = self._conn.execute(f"UPDATE games SET metadata_status=? WHERE {where}", [MetadataStatus.QUEUED, *params])
+        self._conn.commit(); return cursor.rowcount
+
+    def queued_games(self) -> list[sqlite3.Row]:
+        return list(self._conn.execute("SELECT * FROM games WHERE metadata_status=? ORDER BY id", (MetadataStatus.QUEUED,)))
+
+    def set_metadata_status(self, game_id: int, status: MetadataStatus) -> None:
+        self._conn.execute("UPDATE games SET metadata_status=?, updated_at=? WHERE id=?", (status, now_iso(), game_id)); self._conn.commit()
+
+    def save_candidates(self, game_id: int, provider: str, ranked) -> None:
+        with self._conn:
+            self._conn.execute("DELETE FROM metadata_match_candidates WHERE game_id=?", (game_id,))
+            for match in ranked[:10]:
+                game = match.game
+                self._conn.execute("""INSERT INTO metadata_match_candidates
+                    (game_id,provider,external_game_id,title,platform,release_date,release_year,score,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?)""", (game_id, provider, game.external_id, game.title, game.platform,
+                    game.release_date, game.release_year, match.score, now_iso()))
+
+    def list_candidates(self, game_id: int) -> list[sqlite3.Row]:
+        return list(self._conn.execute("SELECT * FROM metadata_match_candidates WHERE game_id=? ORDER BY score DESC", (game_id,)))
+
+    def apply_metadata(self, game_id: int, game: ExternalGame, provider: str, score: float,
+                       method: str, status: MetadataStatus = MetadataStatus.MATCHED) -> None:
+        current = self._conn.execute("SELECT metadata_status FROM games WHERE id=?", (game_id,)).fetchone()
+        if not current: raise DatabaseError("Spiel nicht gefunden")
+        if current[0] == MetadataStatus.MANUAL and method != "manual": return
+        timestamp = now_iso()
+        with self._conn:
+            self._conn.execute("""UPDATE games SET canonical_title=?,external_game_id=?,external_platform_id=?,
+                release_date=?,release_year=?,publisher=?,developer=?,description=?,region=?,metadata_source=?,
+                metadata_status=?,metadata_last_updated=?,metadata_match_score=?,metadata_match_method=?,updated_at=? WHERE id=?""",
+                (game.title, game.external_id, game.external_platform_id, game.release_date, game.release_year,
+                 game.publisher, game.developer, game.description, game.region, provider, status, timestamp, score, method, timestamp, game_id))
+            self._conn.execute("DELETE FROM metadata_match_candidates WHERE game_id=?", (game_id,))
+
+    def apply_candidate_manually(self, game_id: int, external: ExternalGame, provider: str, score: float) -> None:
+        self.apply_metadata(game_id, external, provider, score, "manual", MetadataStatus.MANUAL)
+        LOGGER.info("Manueller Metadata-Match game=%s provider=%s", game_id, provider)
+
+    def set_cover(self, game_id: int, path: str | None, source: str | None) -> None:
+        self._conn.execute("UPDATE games SET cover_path=?,cover_source=?,updated_at=? WHERE id=?", (path, source, now_iso(), game_id)); self._conn.commit()
+
+    def reset_metadata(self, game_id: int) -> None:
+        with self._conn:
+            self._conn.execute("""UPDATE games SET metadata_status='not_requested',metadata_source=NULL,external_game_id=NULL,
+                external_platform_id=NULL,canonical_title=NULL,release_date=NULL,release_year=NULL,publisher=NULL,
+                developer=NULL,description=NULL,region=NULL,metadata_last_updated=NULL,metadata_match_score=NULL,
+                metadata_match_method=NULL WHERE id=?""", (game_id,))
+            self._conn.execute("DELETE FROM metadata_match_candidates WHERE game_id=?", (game_id,))

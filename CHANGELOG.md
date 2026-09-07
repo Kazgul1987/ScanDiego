@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 – 2026-09-07
+
+- Austauschbare IGDB-/SteamGridDB-Provider, zentraler HTTP-Client und sichere Laufzeitkonfiguration ohne eingebettete Schlüssel.
+- Persistente, sequenzielle Metadata-Queue mit QThread-Integration, manueller Schutzlogik und direktem Refresh über externe IDs.
+- Plattformbewusstes Fuzzy-Matching, gespeicherte Kandidaten und konfigurierbare 90/75-Schwellenwerte.
+- Atomarer lokaler JPEG/PNG/WebP-Cover-Cache, echte Coveransicht sowie präzisierte Cleanup-Kategorien.
+- Additive Schema-v4-Migration und vollständig offline arbeitende Fake-Provider-Tests.
+
 ## 0.6.0 – 2026-09-07
 
 - Vollständiger, read-only Cleanup-Drill-down für alle acht Kategorien.

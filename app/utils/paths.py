@@ -23,6 +23,11 @@ def get_database_path() -> Path:
     return get_data_dir() / "scandiego.db"
 
 
+def get_covers_dir() -> Path:
+    return get_data_dir() / "covers"
+
+
 def ensure_runtime_dirs() -> None:
     get_data_dir().mkdir(parents=True, exist_ok=True)
     get_logs_dir().mkdir(parents=True, exist_ok=True)
+    get_covers_dir().mkdir(parents=True, exist_ok=True)
