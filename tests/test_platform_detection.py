@@ -10,6 +10,10 @@ from app.services.platform_detection_service import PlatformDetectionService
     (r"F:\ROMs\Super Famicom\Mario.sfc", Platform.SNES),
     (r"F:\unsorted\Pokemon.gba", Platform.GAME_BOY_ADVANCE),
     (r"F:\unsorted\mystery.iso", Platform.UNKNOWN),
+    (r"D:\Games\PC\Game Name\game.iso", Platform.PC),
+    (r"D:\PC\Game Name\game.iso", Platform.PC),
+    (r"D:\Windows Games\Game Name\game.iso", Platform.PC),
+    (r"D:\Games\SpaceGame\game.iso", Platform.UNKNOWN),
 ])
 def test_detect(path, expected):
     assert PlatformDetectionService().detect(path) == expected

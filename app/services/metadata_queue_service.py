@@ -1,9 +1,11 @@
 from __future__ import annotations
 import logging, threading, time
-from app.models.metadata import MetadataStatus
+from dataclasses import replace
+from app.models.metadata import ExternalPlatform, MetadataStatus
 from app.providers.base import MetadataProvider
 from app.services.game_matching_service import GameMatchingService
 from app.services.metadata_completeness_service import MetadataCompletenessService
+from app.services.platform_detection_service import PlatformDetectionService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,6 +35,11 @@ class MetadataQueueService:
                 self.db.set_metadata_status(game_id, MetadataStatus.SEARCHING)
                 if local["external_game_id"] and local["metadata_source"] == self.provider.name:
                     external = self.provider.get_game(local["external_game_id"]); score = local["metadata_match_score"] or 100
+                    selected = next((p for p in external.available_platforms
+                                     if p.normalized_platform == PlatformDetectionService.family(local["platform"])), None)
+                    if selected:
+                        external = replace(external, platform=local["platform"],
+                                           external_platform_id=selected.external_platform_id)
                     state = MetadataCompletenessService.status(external)
                     self.db.apply_metadata(game_id, external, self.provider.name, score, "refresh", MetadataStatus(state))
                 else:
@@ -40,8 +47,25 @@ class MetadataQueueService:
                     state = self.matcher.classify(ranked)
                     self.db.save_candidates(game_id, self.provider.name, ranked)
                     if state == "matched":
-                        external = ranked[0].game; state = MetadataCompletenessService.status(external)
-                        self.db.apply_metadata(game_id, external, self.provider.name, ranked[0].score, "automatic", MetadataStatus(state))
+                        external = ranked[0].game
+                        choices = [p for p in external.available_platforms if p.normalized_platform != "Unknown"]
+                        if not choices and external.platform:
+                            choices = [ExternalPlatform(external.external_platform_id or "", external.platform,
+                                                       PlatformDetectionService.family(external.platform))]
+                        local_platform = local["platform"]
+                        if local_platform == "Unknown" and len(choices) != 1:
+                            state = "ambiguous"
+                            self.db.set_metadata_status(game_id, MetadataStatus.AMBIGUOUS)
+                            external = None
+                        else:
+                            selected = (next((p for p in choices if p.normalized_platform == PlatformDetectionService.family(local_platform)), None)
+                                        if local_platform != "Unknown" else choices[0] if choices else None)
+                            if selected:
+                                external = replace(external, platform=selected.normalized_platform,
+                                                   external_platform_id=selected.external_platform_id)
+                            state = MetadataCompletenessService.status(external)
+                            self.db.apply_metadata(game_id, external, self.provider.name, ranked[0].score,
+                                                   "automatic", MetadataStatus(state), local_platform == "Unknown")
                     else: self.db.set_metadata_status(game_id, MetadataStatus(state)); external = None
                 stats["matched" if state == "incomplete" else state] += 1
                 # Compatibility for automatic-cover callers: dispatch through the

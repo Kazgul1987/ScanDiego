@@ -17,6 +17,13 @@ class MetadataStatus(StrEnum):
     NO_MATCH = "no_match"
 
 
+@dataclass(slots=True, frozen=True)
+class ExternalPlatform:
+    external_platform_id: str
+    external_platform_name: str
+    normalized_platform: str
+
+
 @dataclass(slots=True)
 class ExternalGame:
     external_id: str
@@ -29,6 +36,7 @@ class ExternalGame:
     developer: str | None = None
     description: str | None = None
     region: str | None = None
+    available_platforms: list[ExternalPlatform] = field(default_factory=list)
     payload: dict[str, Any] = field(default_factory=dict, repr=False)
 
 

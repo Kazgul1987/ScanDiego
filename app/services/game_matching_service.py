@@ -2,6 +2,7 @@ from __future__ import annotations
 import difflib, re, unicodedata
 from dataclasses import dataclass
 from app.models.metadata import ExternalGame
+from app.services.platform_detection_service import PlatformDetectionService
 
 
 def normalize(value: str) -> str:
@@ -22,12 +23,18 @@ class GameMatchingService:
 
     def score(self, title: str, platform: str, candidate: ExternalGame, release_year: int | None = None) -> ScoredMatch:
         title_score = difflib.SequenceMatcher(None, normalize(title), normalize(candidate.title)).ratio() * 75
-        local_platform, remote_platform = normalize(platform), normalize(candidate.platform)
-        aliases = {"ps2": "playstation 2", "ps3": "playstation 3", "ps4": "playstation 4", "ps5": "playstation 5", "switch": "nintendo switch"}
-        local_platform, remote_platform = aliases.get(local_platform, local_platform), aliases.get(remote_platform, remote_platform)
-        platform_match = bool(local_platform and remote_platform and local_platform == remote_platform)
+        local_family = PlatformDetectionService.family(platform)
+        remote_families = {p.normalized_platform for p in candidate.available_platforms}
+        if remote_families:
+            platform_match = local_family != "Unknown" and local_family in remote_families
+        else:
+            remote = normalize(candidate.platform)
+            aliases = {"ps2": "playstation 2", "ps3": "playstation 3", "ps4": "playstation 4",
+                       "ps5": "playstation 5", "switch": "nintendo switch"}
+            platform_match = normalize(platform) != "unknown" and aliases.get(normalize(platform), normalize(platform)) == aliases.get(remote, remote)
+            remote_families = {remote} if remote else set()
         # A known conflict is a hard cap, so title identity can never auto-match it.
-        if local_platform != "unknown" and remote_platform and not platform_match:
+        if local_family != "Unknown" and remote_families and not platform_match:
             return ScoredMatch(candidate, min(55.0, title_score), False)
         result = title_score + (25 if platform_match else 5)
         if release_year and candidate.release_year: result += 5 if release_year == candidate.release_year else -min(15, abs(release_year-candidate.release_year)*3)

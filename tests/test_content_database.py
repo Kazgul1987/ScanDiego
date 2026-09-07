@@ -13,7 +13,7 @@ def media(path, title="Game", kind=MediaContentType.UNKNOWN):
 
 def test_schema_six_fields_and_multiple_content_files_group_to_one_game(tmp_path):
     db = DatabaseManager(tmp_path / "db.sqlite")
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
     columns = db._columns("media_files")
     assert {"content_type", "content_title", "content_version", "content_id", "base_content_id",
             "content_detection_method", "content_detection_confidence", "content_parent_game_id",

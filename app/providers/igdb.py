@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import logging, time, urllib.parse
 from datetime import datetime, timezone
-from app.models.metadata import ExternalGame, ProviderHealthResult
+from app.models.metadata import ExternalGame, ExternalPlatform, ProviderHealthResult
 from app.providers.base import MetadataProvider
 from app.services.http_client import HttpClient, NetworkError
+from app.services.platform_detection_service import PlatformDetectionService
 
 LOGGER = logging.getLogger(__name__)
 PLATFORM_IDS = {"PC": 6, "Windows": 6, "PlayStation 2": 8, "PlayStation 3": 9,
@@ -33,14 +34,17 @@ class IGDBProvider(MetadataProvider):
     @staticmethod
     def _map(item) -> ExternalGame:
         platforms = item.get("platforms") or []
-        first = platforms[0] if platforms else {}
+        available = [ExternalPlatform(str(platform["id"]), platform.get("name", ""),
+                     PlatformDetectionService.normalize_external(platform.get("name", "")))
+                     for platform in platforms]
         release = item.get("first_release_date")
         date = datetime.fromtimestamp(release, timezone.utc).date().isoformat() if release else None
         year = int(date[:4]) if date else None
         companies = item.get("involved_companies") or []
-        return ExternalGame(str(item["id"]), item.get("name", ""), first.get("name", ""), str(first.get("id")) if first else None,
+        return ExternalGame(str(item["id"]), item.get("name", ""),
                             release_date=date, release_year=year, publisher=next((x["company"]["name"] for x in companies if x.get("publisher")), None),
-                            developer=next((x["company"]["name"] for x in companies if x.get("developer")), None), description=item.get("summary"))
+                            developer=next((x["company"]["name"] for x in companies if x.get("developer")), None),
+                            description=item.get("summary"), available_platforms=available)
 
     def search_game(self, title: str, platform: str) -> list[ExternalGame]:
         safe = title.replace('"', '\\"')

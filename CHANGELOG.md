@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.2 – 2026-09-07
+
+- Bulk-Metadatenabruf wiederholt zuvor fehlgeschlagene Lookups und prüft vorher die IGDB-Konfiguration.
+- IGDB-Multiplattformspiele behalten alle unterstützten Plattformen als einen Kandidaten.
+- Explizite Plattformauswahl beim manuellen Match und sichere Auflösung unbekannter Plattformen ergänzt.
+- Bekannte lokale Plattformen werden vor unbeabsichtigtem Überschreiben geschützt.
+- Konservative PC-Erkennung anhand vollständiger Verzeichnissegmente erweitert.
+- Manuelle, scanbeständige Plattformkorrektur und verbessertes Feedback für leere Queues ergänzt.
+
 ## 0.9.1 – 2026-09-07
 
 - Self-Parents für DLCs, Add-ons und Updates verhindert und bestehende ungültige Beziehungen beim Start repariert.
