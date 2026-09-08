@@ -712,8 +712,13 @@ class MainWindow(QMainWindow):
     def _start_metadata_queue(self) -> None:
         if self.metadata_thread and self.metadata_thread.isRunning(): return
         self.metadata_thread=QThread(self); self.metadata_worker=MetadataWorker(self.db.db_path,self.metadata_settings); self.metadata_worker.moveToThread(self.metadata_thread)
-        self.metadata_thread.started.connect(self.metadata_worker.run); self.metadata_worker.finished.connect(self._metadata_finished); self.metadata_worker.failed.connect(self._metadata_failed)
-        self.metadata_worker.finished.connect(self.metadata_thread.quit); self.metadata_worker.failed.connect(self.metadata_thread.quit); self.metadata_thread.finished.connect(self.metadata_thread.deleteLater); self.metadata_thread.start()
+        self.metadata_thread.started.connect(self.metadata_worker.run)
+        self.metadata_worker.finished.connect(self._metadata_finished)
+        self.metadata_worker.failed.connect(self._metadata_failed)
+        self.metadata_worker.finished.connect(self.metadata_thread.quit)
+        self.metadata_worker.failed.connect(self.metadata_thread.quit)
+        self.metadata_thread.finished.connect(self.metadata_thread.deleteLater)
+        self.metadata_thread.start()
 
     def toggle_metadata_pause(self):
         if not self.metadata_worker: return

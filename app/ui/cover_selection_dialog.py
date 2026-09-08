@@ -76,7 +76,9 @@ class CoverSelectionDialog(QDialog):
         self.use = self.buttons.addButton("Dieses Cover verwenden", QDialogButtonBox.ButtonRole.AcceptRole)
         self.use.setEnabled(False); layout.addWidget(self.info); layout.addWidget(self.list); layout.addWidget(self.buttons)
         self.buttons.rejected.connect(self.reject); self.use.clicked.connect(self._apply)
-        self.list.currentRowChanged.connect(lambda row: self.use.setEnabled(row >= 0))
+        self.list.currentItemChanged.connect(
+            lambda current, _: self.use.setEnabled(
+                current is not None and current.data(Qt.ItemDataRole.UserRole) is not None))
         self._search(title)
 
     def _search(self, title):
@@ -88,19 +90,33 @@ class CoverSelectionDialog(QDialog):
 
     def _loaded(self, candidates, previews):
         self.candidates = candidates; self.list.clear()
-        for candidate, body in zip(candidates, previews):
-            pixmap = QPixmap(); pixmap.loadFromData(body)
-            text = f"{candidate.game_title}\n{candidate.width or '?'} × {candidate.height or '?'} · ID {candidate.artwork_id}"
-            self.list.addItem(QListWidgetItem(QIcon(pixmap), text))
+        game_ids = list(dict.fromkeys(candidate.external_game_id for candidate in candidates))
+        for external_game_id in game_ids:
+            grouped = [(index, candidate, previews[index]) for index, candidate in enumerate(candidates)
+                       if candidate.external_game_id == external_game_id]
+            first = grouped[0][1]
+            if len(game_ids) > 1:
+                heading = QListWidgetItem(f"{first.game_title}  ·  Match: {first.score:.0f} %")
+                heading.setFlags(Qt.ItemFlag.NoItemFlags)
+                self.list.addItem(heading)
+            for index, candidate, body in grouped:
+                pixmap = QPixmap(); pixmap.loadFromData(body)
+                details = f"{candidate.width or '?'} × {candidate.height or '?'}"
+                if candidate.style:
+                    details += f" · {candidate.style}"
+                item = QListWidgetItem(QIcon(pixmap), details)
+                item.setData(Qt.ItemDataRole.UserRole, index)
+                self.list.addItem(item)
         self.info.setText(f"{len(candidates)} Cover gefunden" if candidates else "Keine Cover gefunden.")
 
     def _failed(self, message): self.info.setText("Cover-Suche fehlgeschlagen: " + message)
 
     def _apply(self):
-        row = self.list.currentRow()
-        if row < 0: return
+        item = self.list.currentItem()
+        if item is None or item.data(Qt.ItemDataRole.UserRole) is None: return
+        candidate = self.candidates[item.data(Qt.ItemDataRole.UserRole)]
         self.use.setEnabled(False); self.info.setText("Cover wird heruntergeladen …")
-        self.thread = QThread(self); self.worker = ApplyCandidateWorker(self.db_path, self.row["id"], self.candidates[row], self.settings)
+        self.thread = QThread(self); self.worker = ApplyCandidateWorker(self.db_path, self.row["id"], candidate, self.settings)
         self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run)
         self.worker.finished.connect(lambda _: (self.cover_applied.emit(), self.accept()))
         self.worker.failed.connect(self._failed); self.worker.finished.connect(self.thread.quit); self.worker.failed.connect(self.thread.quit)
