@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.3 – 2026-09-08
+
+- Fixed a crash after manually applying a selected cover.
+- Improved QThread lifecycle handling in the cover selection dialog.
+- Added SteamGridDB artwork fallback when preferred cover dimensions are unavailable.
+- Added portrait/aspect-ratio based fallback artwork ranking.
+- Manual cover selection now also uses unfiltered artwork fallback.
+- Bulk cover downloads benefit from the broader artwork fallback.
+- Preserved conservative ambiguous game matching.
+- Added regression tests for cover apply thread cleanup and artwork fallback.
+
 ## 0.10.2 – 2026-09-08
 
 - Fixed duplicate MetadataWorker signal connections.

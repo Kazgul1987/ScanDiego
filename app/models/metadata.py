@@ -15,6 +15,7 @@ class MetadataStatus(StrEnum):
     FAILED = "failed"
     MANUAL = "manual"
     NO_MATCH = "no_match"
+    NO_ARTWORK = "no_artwork"
 
 
 @dataclass(slots=True, frozen=True)
