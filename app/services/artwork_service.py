@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging, os, tempfile
 from pathlib import Path
-from app.models.metadata import ExternalGame
+from app.models.metadata import ArtworkCandidate, ExternalGame
 from app.providers.base import ArtworkProvider
 from app.utils.paths import get_covers_dir
 
@@ -32,7 +32,17 @@ class ArtworkService:
         direct = getattr(self.provider, "covers_for_game", None)
         covers = direct(artwork_external_id) if artwork_external_id and direct else self.provider.search_cover(game)
         if not covers: return None
-        body, content_type = self.provider.download_cover(covers[0]); content_type = content_type.split(";", 1)[0].lower()
+        body, content_type = self.provider.download_cover(covers[0])
+        target = self._write_validated(body, content_type, prefix)
+        return target, covers[0].external_game_id or artwork_external_id
+
+    def apply_candidate(self, game_id: int, candidate: ArtworkCandidate) -> Path:
+        body, content_type = self.provider.download_candidate(candidate)
+        prefix = f"{self.provider.name}_{candidate.external_game_id}_{game_id}"
+        return self._write_validated(body, content_type, prefix)
+
+    def _write_validated(self, body: bytes, content_type: str, prefix: str) -> Path:
+        content_type = content_type.split(";", 1)[0].lower()
         if content_type not in CONTENT_TYPES or not body or not body.startswith(MAGIC[content_type]): raise InvalidArtworkError("Ungültige Bildantwort")
         if content_type == "image/webp" and (len(body) < 12 or body[8:12] != b"WEBP"): raise InvalidArtworkError("Ungültiges WebP")
         target = self.cache_dir / (prefix + CONTENT_TYPES[content_type])
@@ -43,9 +53,15 @@ class ArtworkService:
         finally:
             if os.path.exists(temp_name): os.unlink(temp_name)
         LOGGER.info("Cover gespeichert: %s", target.name)
-        return target, covers[0].external_game_id or artwork_external_id
+        return target
 
     def remove(self, path: str | None) -> None:
-        if path:
+        if path and self.is_cache_path(path):
             try: Path(path).unlink(missing_ok=True)
             except OSError: LOGGER.exception("Cover konnte nicht entfernt werden")
+
+    def is_cache_path(self, path: str | Path) -> bool:
+        try:
+            return Path(path).resolve().parent == self.cache_dir.resolve()
+        except (OSError, RuntimeError):
+            return False

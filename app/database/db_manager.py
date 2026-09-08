@@ -18,7 +18,7 @@ from app.services.duplicate_detection_service import DuplicateDetectionService, 
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class DatabaseError(RuntimeError):
@@ -146,6 +146,8 @@ class DatabaseManager:
                 "metadata_match_score REAL", "metadata_match_method TEXT", "cover_source TEXT",
                 "metadata_locked INTEGER NOT NULL DEFAULT 0", "artwork_source TEXT",
                 "artwork_external_game_id TEXT", "artwork_status TEXT NOT NULL DEFAULT 'not_requested'",
+                "artwork_external_id TEXT", "artwork_match_method TEXT",
+                "artwork_force_refresh INTEGER NOT NULL DEFAULT 0",
             ):
                 self._add_column("games", definition)
             self._conn.executescript("""
@@ -166,6 +168,7 @@ class DatabaseManager:
             self._add_column("metadata_match_candidates", "platforms_json TEXT NOT NULL DEFAULT '[]'")
             # Interrupted work is safe to reconstruct on next startup.
             self._conn.execute("UPDATE games SET metadata_status=? WHERE metadata_status=?", (MetadataStatus.QUEUED, MetadataStatus.SEARCHING))
+            self._conn.execute("UPDATE games SET artwork_status='queued' WHERE artwork_status='searching'")
             self._backfill_normalized_tables()
             self._repair_invalid_self_parents()
             self._conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
@@ -745,9 +748,9 @@ class DatabaseManager:
             candidates = self._conn.execute(f"SELECT id,cover_path FROM games WHERE {where}", params).fetchall()
             ids = [row["id"] for row in candidates if not row["cover_path"] or not Path(row["cover_path"]).is_file()]
             if not ids: return 0
-            cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued' WHERE id IN ({','.join('?' for _ in ids)})", ids)
+            cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued',artwork_force_refresh=0 WHERE id IN ({','.join('?' for _ in ids)})", ids)
         else:
-            cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued' WHERE {where}", params)
+            cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued',artwork_force_refresh=1 WHERE {where}", params)
         self._conn.commit(); return cursor.rowcount
 
     def queued_covers(self):
@@ -757,8 +760,19 @@ class DatabaseManager:
                            source: str | None = None, external_id: str | None = None) -> None:
         self._conn.execute("""UPDATE games SET artwork_status=?,cover_path=COALESCE(?,cover_path),
             cover_source=COALESCE(?,cover_source),artwork_source=COALESCE(?,artwork_source),
-            artwork_external_game_id=COALESCE(?,artwork_external_game_id),updated_at=? WHERE id=?""",
+            artwork_external_game_id=COALESCE(?,artwork_external_game_id),artwork_force_refresh=0,updated_at=? WHERE id=?""",
             (status, path, source, source, external_id, now_iso(), game_id)); self._conn.commit()
+
+    def set_manual_artwork(self, game_id: int, path: str, source: str,
+                           external_game_id: str, artwork_id: str) -> None:
+        self._conn.execute("""UPDATE games SET cover_path=?,cover_source=?,artwork_source=?,artwork_status='matched',
+            artwork_external_game_id=?,artwork_external_id=?,artwork_match_method='manual',
+            artwork_force_refresh=0,updated_at=? WHERE id=?""",
+            (path, source, source, external_game_id, artwork_id, now_iso(), game_id)); self._conn.commit()
+
+    def cover_path_is_shared(self, path: str, excluding_game_id: int) -> bool:
+        return self._conn.execute("SELECT 1 FROM games WHERE cover_path=? AND id<>? LIMIT 1",
+                                  (path, excluding_game_id)).fetchone() is not None
 
     def reset_metadata(self, game_id: int) -> None:
         with self._conn:

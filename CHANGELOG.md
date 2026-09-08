@@ -1,15 +1,25 @@
 # Changelog
 
+## 0.10.1 – 2026-09-08
+
+- Added manual SteamGridDB cover selection for ambiguous artwork matches.
+- Added visible cover queue progress.
+- Added pause/resume/cancel controls for cover downloads.
+- Fixed forced cover refresh so cached artwork is actually refreshed.
+- Existing cover remains intact when refresh fails.
+- Old cached cover files are cleaned up only after successful replacement.
+- Improved SteamGridDB ambiguous-match logging.
+- Separated Cover laden and Cover aktualisieren actions.
+
 ## 0.10.0 – 2026-09-08
 
 - Added large responsive game-card library view.
 - Increased cover artwork size and improved placeholders.
 - Added game-centric sorting, filtering and search.
 - Added bulk download for all missing game covers.
-- Added cover queue progress and duplicate protection.
+- Added cover queue duplicate protection.
 - Improved SteamGridDB artwork matching diagnostics.
-- Added manual cover selection for ambiguous artwork matches.
-- Added safe cover refresh and removal actions.
+- Added conservative detection of ambiguous artwork matches.
 - Cover rendering now uses only local cached artwork and does not block the UI.
 
 ## 0.9.3 – 2026-09-07

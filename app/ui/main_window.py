@@ -52,6 +52,7 @@ from app.providers.factory import create_metadata_provider, create_artwork_provi
 from app.services.game_matching_service import GameMatchingService
 from app.services.match_review_service import MatchReviewService
 from app.services.artwork_service import ArtworkService
+from app.ui.cover_selection_dialog import CoverSelectionDialog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -234,6 +235,12 @@ class MainWindow(QMainWindow):
         self.btn_metadata_settings = QPushButton("Metadaten & Cover einstellen")
         self.btn_metadata_pause = QPushButton("Pause"); self.btn_metadata_cancel = QPushButton("Abbrechen")
         metadata_controls.addWidget(self.btn_metadata_all); metadata_controls.addWidget(self.btn_covers_all); metadata_controls.addWidget(self.btn_metadata_settings); metadata_controls.addWidget(self.btn_metadata_pause); metadata_controls.addWidget(self.btn_metadata_cancel)
+        self.cover_progress_label = QLabel("Cover: bereit")
+        self.btn_cover_pause = QPushButton("Pause"); self.btn_cover_resume = QPushButton("Fortsetzen")
+        self.btn_cover_cancel = QPushButton("Abbrechen")
+        for button in (self.btn_cover_pause, self.btn_cover_resume, self.btn_cover_cancel): button.setEnabled(False)
+        metadata_controls.addWidget(self.cover_progress_label); metadata_controls.addWidget(self.btn_cover_pause)
+        metadata_controls.addWidget(self.btn_cover_resume); metadata_controls.addWidget(self.btn_cover_cancel)
         grid_layout.addLayout(metadata_controls)
         cover_filters = QHBoxLayout()
         cover_filters.addWidget(QLabel("Sortieren nach:"))
@@ -292,6 +299,9 @@ class MainWindow(QMainWindow):
         self.btn_metadata_settings.clicked.connect(self.open_metadata_settings)
         self.btn_metadata_pause.clicked.connect(self.toggle_metadata_pause)
         self.btn_metadata_cancel.clicked.connect(lambda: self.metadata_worker and self.metadata_worker.cancel())
+        self.btn_cover_pause.clicked.connect(self.pause_cover_queue)
+        self.btn_cover_resume.clicked.connect(self.resume_cover_queue)
+        self.btn_cover_cancel.clicked.connect(lambda: self.cover_worker and self.cover_worker.cancel())
         self.cover_sort.currentIndexChanged.connect(self.reload_db)
         self.cover_filter.currentIndexChanged.connect(self.reload_db)
         self.cover_placeholders.customContextMenuRequested.connect(self._show_cover_context_menu)
@@ -579,8 +589,10 @@ class MainWindow(QMainWindow):
             refresh = menu.addAction("Metadaten aktualisieren")
             review = menu.addAction("Match prüfen")
             change = menu.addAction("Match ändern")
-            cover = menu.addAction("Cover laden / aktualisieren")
-            remove_cover = menu.addAction("Cover entfernen")
+            has_cover = bool(row.get("cover_path") and Path(row["cover_path"]).is_file())
+            cover = menu.addAction("Cover aktualisieren" if has_cover else "Cover laden")
+            select_cover = menu.addAction("Cover auswählen...")
+            remove_cover = menu.addAction("Cover entfernen") if has_cover else None
             reset = menu.addAction("Metadaten zurücksetzen")
             change_platform = menu.addAction("Plattform ändern...")
             search.triggered.connect(lambda: self.enqueue_game(row["game_id"], False))
@@ -588,8 +600,9 @@ class MainWindow(QMainWindow):
             review.setEnabled(row.get("metadata_status") == "ambiguous")
             review.triggered.connect(lambda: self.open_match_review(row["game_id"]))
             change.triggered.connect(lambda: self.open_match_review(row["game_id"]))
-            cover.triggered.connect(lambda: (self.db.enqueue_covers([row["game_id"]], True), self._start_cover_queue()))
-            remove_cover.triggered.connect(lambda: self._remove_cover(row["game_id"]))
+            cover.triggered.connect(lambda: (self.db.enqueue_covers([row["game_id"]], has_cover), self._start_cover_queue()))
+            select_cover.triggered.connect(lambda: self.open_cover_selection(row["game_id"]))
+            if remove_cover: remove_cover.triggered.connect(lambda: self._remove_cover(row["game_id"]))
             reset.triggered.connect(lambda: (self.db.reset_metadata(row["game_id"]), self.reload_db()))
             change_platform.triggered.connect(lambda: self.change_game_platform(row["game_id"], row["platform"]))
         menu.exec(self.games_table.viewport().mapToGlobal(pos))
@@ -608,12 +621,14 @@ class MainWindow(QMainWindow):
         if not row: return
         menu = QMenu(self)
         details = menu.addAction("Details öffnen")
-        cover = menu.addAction("Cover laden / aktualisieren")
-        remove = menu.addAction("Cover entfernen")
+        cover = menu.addAction("Cover aktualisieren" if row["has_cover"] else "Cover laden")
+        select_cover = menu.addAction("Cover auswählen...")
+        remove = menu.addAction("Cover entfernen") if row["has_cover"] else None
         platform = menu.addAction("Plattform ändern...")
         details.triggered.connect(lambda: self._open_cover_details(item))
-        cover.triggered.connect(lambda: (self.db.enqueue_covers([game_id], True), self._start_cover_queue()))
-        remove.setEnabled(row["has_cover"]); remove.triggered.connect(lambda: self._remove_cover(game_id))
+        cover.triggered.connect(lambda: (self.db.enqueue_covers([game_id], bool(row["has_cover"])), self._start_cover_queue()))
+        select_cover.triggered.connect(lambda: self.open_cover_selection(game_id))
+        if remove: remove.triggered.connect(lambda: self._remove_cover(game_id))
         platform.triggered.connect(lambda: self.change_game_platform(game_id, row["platform"]))
         menu.exec(self.cover_placeholders.viewport().mapToGlobal(pos))
 
@@ -637,6 +652,12 @@ class MainWindow(QMainWindow):
 
     def _remove_cover(self, game_id):
         ArtworkService(create_artwork_provider(self.metadata_settings)).remove(self.db.remove_cover(game_id)); self.reload_db()
+
+    def open_cover_selection(self, game_id):
+        row = self.db._conn.execute("SELECT * FROM games WHERE id=?", (game_id,)).fetchone()
+        if not row: return
+        dialog = CoverSelectionDialog(row, self.db.db_path, self.metadata_settings, self)
+        dialog.cover_applied.connect(self.reload_db); dialog.exec()
 
     def enqueue_game(self, game_id: int, force=False) -> None:
         if self.db.enqueue_metadata([game_id], force): self._start_metadata_queue()
@@ -663,11 +684,29 @@ class MainWindow(QMainWindow):
     def _start_cover_queue(self):
         if self.cover_thread and self.cover_thread.isRunning(): return
         self.cover_thread=QThread(self); self.cover_worker=CoverWorker(self.db.db_path,self.metadata_settings); self.cover_worker.moveToThread(self.cover_thread)
-        self.cover_thread.started.connect(self.cover_worker.run); self.cover_worker.finished.connect(self._cover_finished); self.cover_worker.failed.connect(self._metadata_failed)
+        self.cover_thread.started.connect(self.cover_worker.run); self.cover_worker.finished.connect(self._cover_finished); self.cover_worker.failed.connect(self._cover_failed)
+        self.cover_worker.progress.connect(self._cover_progress)
         self.cover_worker.finished.connect(self.cover_thread.quit); self.cover_worker.failed.connect(self.cover_thread.quit); self.cover_thread.start()
+        self.btn_cover_pause.setEnabled(True); self.btn_cover_resume.setEnabled(False); self.btn_cover_cancel.setEnabled(True)
+
+    def _cover_progress(self, current, total, downloaded, ambiguous, failed):
+        self.cover_progress_label.setText(f"Cover: {current} / {total} · {downloaded} geladen · {ambiguous} unklar · {failed} Fehler")
+
+    def pause_cover_queue(self):
+        if self.cover_worker: self.cover_worker.pause(); self.btn_cover_pause.setEnabled(False); self.btn_cover_resume.setEnabled(True)
+
+    def resume_cover_queue(self):
+        if self.cover_worker: self.cover_worker.resume(); self.btn_cover_pause.setEnabled(True); self.btn_cover_resume.setEnabled(False)
 
     def _cover_finished(self, stats):
         self.statusBar().showMessage(f"Cover: {stats['processed']} verarbeitet · {stats['ambiguous']} unklar · {stats['failed']} Fehler")
+        for button in (self.btn_cover_pause, self.btn_cover_resume, self.btn_cover_cancel): button.setEnabled(False)
+        self.cover_worker=None; self.cover_thread=None; self.reload_db()
+
+    def _cover_failed(self, message):
+        self.cover_progress_label.setText("Cover: fehlgeschlagen")
+        self.statusBar().showMessage("Cover-Queue: " + message)
+        for button in (self.btn_cover_pause, self.btn_cover_resume, self.btn_cover_cancel): button.setEnabled(False)
         self.cover_worker=None; self.cover_thread=None; self.reload_db()
 
     def _start_metadata_queue(self) -> None:

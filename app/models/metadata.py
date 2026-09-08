@@ -49,6 +49,21 @@ class CoverResult:
     external_game_id: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class ArtworkCandidate:
+    """A stable, provider-neutral artwork choice shown to the user."""
+    artwork_id: str
+    external_game_id: str
+    game_title: str
+    image_url: str
+    thumb_url: str | None = None
+    width: int | None = None
+    height: int | None = None
+    score: float = 0.0
+    style: str | None = None
+    tags: tuple[str, ...] = ()
+
+
 @dataclass(slots=True)
 class ProviderHealthResult:
     success: bool
