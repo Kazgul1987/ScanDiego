@@ -6,8 +6,8 @@ import os
 import subprocess
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Qt
-from PySide6.QtGui import QAction, QIcon, QStandardItem, QStandardItemModel
+from PySide6.QtCore import QSize, QThread, Qt
+from PySide6.QtGui import QAction, QIcon, QPainter, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -92,6 +92,9 @@ class MainWindow(QMainWindow):
         if self.metadata_worker: self.metadata_worker.cancel()
         if self.metadata_thread and self.metadata_thread.isRunning():
             self.metadata_thread.quit(); self.metadata_thread.wait(2_000)
+        if self.cover_worker: self.cover_worker.cancel()
+        if self.cover_thread and self.cover_thread.isRunning():
+            self.cover_thread.quit(); self.cover_thread.wait(2_000)
         self.db.close()
         super().closeEvent(event)
 
@@ -232,7 +235,29 @@ class MainWindow(QMainWindow):
         self.btn_metadata_pause = QPushButton("Pause"); self.btn_metadata_cancel = QPushButton("Abbrechen")
         metadata_controls.addWidget(self.btn_metadata_all); metadata_controls.addWidget(self.btn_covers_all); metadata_controls.addWidget(self.btn_metadata_settings); metadata_controls.addWidget(self.btn_metadata_pause); metadata_controls.addWidget(self.btn_metadata_cancel)
         grid_layout.addLayout(metadata_controls)
+        cover_filters = QHBoxLayout()
+        cover_filters.addWidget(QLabel("Sortieren nach:"))
+        self.cover_sort = QComboBox()
+        for label, value in (("Titel A–Z","title_asc"),("Titel Z–A","title_desc"),
+                             ("Releasejahr neu → alt","year_desc"),("Releasejahr alt → neu","year_asc"),
+                             ("Plattform","platform"),("Zuletzt gescannt","last_scanned")):
+            self.cover_sort.addItem(label, value)
+        cover_filters.addWidget(self.cover_sort)
+        cover_filters.addWidget(QLabel("Cover:"))
+        self.cover_filter = QComboBox()
+        self.cover_filter.addItem("Alle", "all"); self.cover_filter.addItem("Mit Cover", "with"); self.cover_filter.addItem("Ohne Cover", "without")
+        cover_filters.addWidget(self.cover_filter); cover_filters.addStretch()
+        grid_layout.addLayout(cover_filters)
         self.cover_placeholders = QListWidget()
+        self.cover_placeholders.setViewMode(QListWidget.ViewMode.IconMode)
+        self.cover_placeholders.setIconSize(QSize(220, 330))
+        self.cover_placeholders.setGridSize(QSize(246, 410))
+        self.cover_placeholders.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.cover_placeholders.setMovement(QListWidget.Movement.Static)
+        self.cover_placeholders.setWordWrap(True)
+        self.cover_placeholders.setSpacing(8)
+        self.cover_placeholders.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.cover_placeholders.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         grid_layout.addWidget(self.cover_placeholders)
         self.library_tabs.addTab(grid_page, "Coveransicht")
 
@@ -267,6 +292,10 @@ class MainWindow(QMainWindow):
         self.btn_metadata_settings.clicked.connect(self.open_metadata_settings)
         self.btn_metadata_pause.clicked.connect(self.toggle_metadata_pause)
         self.btn_metadata_cancel.clicked.connect(lambda: self.metadata_worker and self.metadata_worker.cancel())
+        self.cover_sort.currentIndexChanged.connect(self.reload_db)
+        self.cover_filter.currentIndexChanged.connect(self.reload_db)
+        self.cover_placeholders.customContextMenuRequested.connect(self._show_cover_context_menu)
+        self.cover_placeholders.itemDoubleClicked.connect(self._open_cover_details)
 
         self.search_input.textChanged.connect(self.reload_db)
         self.drive_filter.currentIndexChanged.connect(self.reload_db)
@@ -410,16 +439,27 @@ class MainWindow(QMainWindow):
         self._reload_platform_filter()
         self._reload_cleanup()
         self.cover_placeholders.clear()
-        seen = set()
-        for row in self.current_rows:
-            if row.get("game_id") in seen: continue
-            seen.add(row.get("game_id")); year = f" · {row['metadata_release_year']}" if row.get("metadata_release_year") else ""
-            content = self.db.game_content_files(row["game_id"])
-            updates = sum(item["content_type"] == "update" for item in content)
-            addons = sum(item["content_type"] in {"dlc", "addon"} for item in content)
-            badges = f"\n{updates} Updates · {addons} DLCs" if updates or addons else ""
-            item = QListWidgetItem(f"{row.get('canonical_title') or row['title']}\n{row['platform']}{year}{badges}")
-            if row.get("cover_path") and Path(row["cover_path"]).is_file(): item.setIcon(QIcon(row["cover_path"]))
+        card_rows = self.db.list_game_cards(search, platform or "",
+            self.cover_filter.currentData() if self.cover_filter.count() else "all",
+            self.cover_sort.currentData() if self.cover_sort.count() else "title_asc")
+        for row in card_rows:
+            year = f" · {row['release_year']}" if row.get("release_year") else ""
+            badges = []
+            if row["update_count"]: badges.append(f"{row['update_count']} Update" + ("s" if row['update_count'] != 1 else ""))
+            dlc = row["dlc_count"] + row["addon_count"]
+            if dlc: badges.append(f"{dlc} DLC")
+            if row["missing_file_count"]: badges.append("Offline")
+            item = QListWidgetItem(f"{row['display_title']}\n{row['platform']}{year}\n{' · '.join(badges)}")
+            item.setData(Qt.ItemDataRole.UserRole, row["game_id"])
+            if row["has_cover"]:
+                pixmap = QPixmap(row["cover_path"]).scaled(220, 330, Qt.AspectRatioMode.KeepAspectRatio,
+                                                          Qt.TransformationMode.SmoothTransformation)
+            else:
+                pixmap = QPixmap(220, 330); pixmap.fill(self.palette().alternateBase().color())
+                painter = QPainter(pixmap); painter.setPen(self.palette().placeholderText().color())
+                painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "NO COVER")
+                painter.end()
+            item.setIcon(QIcon(pixmap)); item.setSizeHint(QSize(240, 400))
             self.cover_placeholders.addItem(item)
         self.statusBar().showMessage(f"{len(self.current_rows)} Einträge geladen.")
 
@@ -554,6 +594,29 @@ class MainWindow(QMainWindow):
             change_platform.triggered.connect(lambda: self.change_game_platform(row["game_id"], row["platform"]))
         menu.exec(self.games_table.viewport().mapToGlobal(pos))
 
+    def _open_cover_details(self, item) -> None:
+        game_id = item.data(Qt.ItemDataRole.UserRole)
+        for index, row in enumerate(self.current_rows):
+            if row.get("game_id") == game_id:
+                self.games_table.selectRow(index); self.update_details(); self.library_tabs.setCurrentIndex(0); break
+
+    def _show_cover_context_menu(self, pos) -> None:
+        item = self.cover_placeholders.itemAt(pos)
+        if not item: return
+        game_id = item.data(Qt.ItemDataRole.UserRole)
+        row = next((r for r in self.db.list_game_cards() if r["game_id"] == game_id), None)
+        if not row: return
+        menu = QMenu(self)
+        details = menu.addAction("Details öffnen")
+        cover = menu.addAction("Cover laden / aktualisieren")
+        remove = menu.addAction("Cover entfernen")
+        platform = menu.addAction("Plattform ändern...")
+        details.triggered.connect(lambda: self._open_cover_details(item))
+        cover.triggered.connect(lambda: (self.db.enqueue_covers([game_id], True), self._start_cover_queue()))
+        remove.setEnabled(row["has_cover"]); remove.triggered.connect(lambda: self._remove_cover(game_id))
+        platform.triggered.connect(lambda: self.change_game_platform(game_id, row["platform"]))
+        menu.exec(self.cover_placeholders.viewport().mapToGlobal(pos))
+
     def open_metadata_settings(self) -> None:
         MetadataSettingsDialog(self.metadata_settings, self).exec()
 
@@ -591,7 +654,10 @@ class MainWindow(QMainWindow):
         if count: self._start_metadata_queue()
 
     def enqueue_missing_covers(self) -> None:
-        count = self.db.enqueue_covers(); self.statusBar().showMessage(f"Cover: {count} Spiele eingereiht")
+        count = self.db.enqueue_covers()
+        message = (f"{count} Spiele für Cover-Download eingereiht." if count else
+                   "Keine geeigneten Spiele ohne Cover gefunden.")
+        self.statusBar().showMessage(message)
         if count: self._start_cover_queue()
 
     def _start_cover_queue(self):
