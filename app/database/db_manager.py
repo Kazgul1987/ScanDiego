@@ -447,6 +447,50 @@ class DatabaseManager:
             ORDER BY CASE content_type WHEN 'base_game' THEN 0 WHEN 'update' THEN 1
             WHEN 'dlc' THEN 2 WHEN 'addon' THEN 2 ELSE 3 END, file_name COLLATE NOCASE""", (game_id,)))
 
+    def list_game_cards(self, search: str = "", platform: str = "", cover: str = "all",
+                        sort: str = "title_asc") -> list[dict[str, Any]]:
+        """Return one aggregate row per Game for the cover library.
+
+        File counts are computed in one query.  Cover existence is deliberately
+        checked locally afterwards: SQLite cannot reliably test host paths and
+        rendering the library must never initiate network traffic.
+        """
+        clauses, params = [], []
+        if search.strip():
+            clauses.append("(g.canonical_title LIKE ? OR g.title LIKE ?)")
+            params.extend([f"%{search.strip()}%"] * 2)
+        if platform.strip():
+            clauses.append("g.platform=?"); params.append(platform.strip())
+        order = {
+            "title_asc": "display_title COLLATE NOCASE ASC",
+            "title_desc": "display_title COLLATE NOCASE DESC",
+            "year_desc": "g.release_year IS NULL, g.release_year DESC, display_title COLLATE NOCASE",
+            "year_asc": "g.release_year IS NULL, g.release_year ASC, display_title COLLATE NOCASE",
+            "platform": "g.platform COLLATE NOCASE, display_title COLLATE NOCASE",
+            "last_scanned": "last_scanned DESC, display_title COLLATE NOCASE",
+        }.get(sort, "display_title COLLATE NOCASE ASC")
+        where = "WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._conn.execute(f"""SELECT g.id AS game_id,
+            COALESCE(NULLIF(g.canonical_title,''),g.title) AS display_title,
+            g.canonical_title,g.title,g.platform,g.release_date,g.release_year,g.cover_path,
+            g.metadata_status,g.artwork_status,g.external_game_id,g.artwork_external_game_id,
+            COUNT(mf.id) AS file_count,
+            SUM(CASE WHEN mf.is_missing=0 THEN 1 ELSE 0 END) AS available_file_count,
+            SUM(CASE WHEN mf.is_missing=1 THEN 1 ELSE 0 END) AS missing_file_count,
+            SUM(CASE WHEN mf.content_type='update' THEN 1 ELSE 0 END) AS update_count,
+            SUM(CASE WHEN mf.content_type='dlc' THEN 1 ELSE 0 END) AS dlc_count,
+            SUM(CASE WHEN mf.content_type='addon' THEN 1 ELSE 0 END) AS addon_count,
+            COALESCE(MAX(mf.last_seen),g.updated_at) AS last_scanned,
+            COALESCE(SUM(mf.file_size),0) AS total_size
+            FROM games g LEFT JOIN media_files mf ON mf.game_id=g.id {where}
+            GROUP BY g.id ORDER BY {order}""", params).fetchall()
+        result = [dict(row) for row in rows]
+        for row in result:
+            row["has_cover"] = bool(row["cover_path"] and Path(row["cover_path"]).is_file())
+        if cover == "with": result = [row for row in result if row["has_cover"]]
+        elif cover == "without": result = [row for row in result if not row["has_cover"]]
+        return result
+
     def content_analysis_candidates(self, force: bool = False) -> list[sqlite3.Row]:
         where = "content_locked=0" if force else "content_locked=0 AND content_type='unknown'"
         return list(self._conn.execute(f"SELECT * FROM media_files WHERE {where} ORDER BY id"))
@@ -687,13 +731,23 @@ class DatabaseManager:
 
     def enqueue_covers(self, game_ids: Iterable[int] | None = None, force: bool = False) -> int:
         params: list[Any] = []
-        where = "external_game_id IS NOT NULL AND COALESCE(cover_path,'')='' AND artwork_status NOT IN ('queued','searching')"
+        where = """metadata_status IN ('matched','manual','incomplete')
+            AND (external_game_id IS NOT NULL OR COALESCE(canonical_title,'')<>'')
+            AND artwork_status NOT IN ('queued','searching')
+            AND (EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type='base_game')
+                 OR NOT EXISTS(SELECT 1 FROM media_files mf WHERE mf.game_id=games.id AND mf.content_type<>'unknown'))"""
         if game_ids is not None:
             ids = list(game_ids)
             if not ids: return 0
             where += f" AND id IN ({','.join('?' for _ in ids)})"; params.extend(ids)
-        if force: where = where.replace(" AND COALESCE(cover_path,'')=''", "")
-        cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued' WHERE {where}", params)
+        if not force:
+            # A stale DB path is a missing cover too.
+            candidates = self._conn.execute(f"SELECT id,cover_path FROM games WHERE {where}", params).fetchall()
+            ids = [row["id"] for row in candidates if not row["cover_path"] or not Path(row["cover_path"]).is_file()]
+            if not ids: return 0
+            cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued' WHERE id IN ({','.join('?' for _ in ids)})", ids)
+        else:
+            cursor = self._conn.execute(f"UPDATE games SET artwork_status='queued' WHERE {where}", params)
         self._conn.commit(); return cursor.rowcount
 
     def queued_covers(self):

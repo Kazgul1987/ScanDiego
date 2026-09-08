@@ -1,11 +1,13 @@
-# ScanDiego 0.9.3
+# ScanDiego 0.10.0
 
 ScanDiego ist ein lokaler Game-Collection-Manager für Windows (Python, PySide6 und SQLite). Die Anwendung erkennt externe Datenträger anhand ihrer **Volume Serial Number**, scannt deren Verzeichnisse `Games` und `ROMs` im Hintergrund und bewahrt den ursprünglichen Dateinamen neben einem lesbaren Titel auf.
 
 ## Funktionen
 
 - Bestehende Tabellenansicht mit Suche, Laufwerks-/Plattformfilter, Details und CSV-Export.
-- Bibliotheks-Tabs für Tabelle und echte lokal gecachte Cover (mit robustem Platzhalter-Fallback).
+- Responsive, spielzentrierte Coverbibliothek mit großen Karten, lokal gecachtem Artwork,
+  Suche, Plattform-/Coverfiltern, Sortierung und robustem Platzhalter-Fallback. Der Bulk-Download
+  reiht geeignete fehlende Cover duplikatfrei ein; Updates und DLC bleiben auf einer Game-Karte.
 - **Aufräumen** zeigt anklickbare Detailansichten für Archive, mögliche, wahrscheinliche und bestätigte Dublettengruppen, fehlende Dateien, unbekannte Plattformen/Formate und Spiele mit relevantem Metadatenfehler. Die Zahlen bezeichnen bei Dubletten Gruppen, nicht einzelne Dateien. Es werden keine Dateien automatisch gelöscht oder verschoben.
 - Abbrechbarer `QThread`-Scan mit aktuellem Ordner, geprüften Dateien, Treffern, Warnungen, Laufzeit und Status.
 - Scan-Läufe haben `running`, `completed`, `cancelled`, `failed` oder `completed_with_warnings`. Nur ein vollständig fehlerfreier `completed`-Scan darf ältere Dateien als fehlend markieren. Schon ein nicht lesbarer Unterordner erzeugt Warnstatus und unterdrückt die Missing-Erkennung für das Laufwerk.
