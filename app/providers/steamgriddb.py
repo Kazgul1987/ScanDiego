@@ -3,7 +3,7 @@ import urllib.parse
 import time
 import logging
 from difflib import SequenceMatcher
-from app.models.metadata import CoverResult, ExternalGame, ProviderHealthResult
+from app.models.metadata import ArtworkCandidate, CoverResult, ExternalGame, ProviderHealthResult
 from app.providers.base import ArtworkProvider
 from app.services.http_client import HttpClient, NetworkError
 
@@ -38,13 +38,29 @@ class SteamGridDBProvider(ArtworkProvider):
         if ranked[0][0] < 75:
             LOGGER.info("Artwork match rejected best=%.1f", ranked[0][0]); return []
         if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < 5:
-            LOGGER.info("Artwork match ambiguous best=%.1f second=%.1f delta=%.1f",
-                        ranked[0][0], ranked[1][0], ranked[0][0] - ranked[1][0]); return []
+            best, second = ranked[0], ranked[1]
+            LOGGER.info('Artwork match ambiguous title="%s" best_title="%s" best_id=%s best_score=%.1f '
+                        'second_title="%s" second_id=%s second_score=%.1f delta=%.1f', game.title,
+                        best[1].get("name"), best[1].get("id"), best[0], second[1].get("name"),
+                        second[1].get("id"), second[0], best[0] - second[0]); return []
         LOGGER.info("Artwork match accepted id=%s score=%.1f", ranked[0][1].get("id"), ranked[0][0])
         return self.covers_for_game(str(ranked[0][1]["id"]))
     def covers_for_game(self, external_id: str) -> list[CoverResult]:
         grids = self._get(f"/grids/game/{external_id}?dimensions=600x900,342x482,660x930") or []
         return [CoverResult(x["url"], "poster", x.get("width"), x.get("height"), str(external_id)) for x in grids]
+    def search_artwork_candidates(self, game: ExternalGame, limit: int = 10) -> list[ArtworkCandidate]:
+        games = self._get("/search/autocomplete/" + urllib.parse.quote(game.title)) or []
+        ranked = sorted(((SequenceMatcher(None, game.title.casefold(), (x.get("name") or "").casefold()).ratio() * 100, x)
+                         for x in games), reverse=True, key=lambda value: value[0])
+        candidates: list[ArtworkCandidate] = []
+        for score, match in ranked[:5]:
+            external_id = str(match.get("id"))
+            for grid in (self._get(f"/grids/game/{external_id}?dimensions=600x900,342x482,660x930") or []):
+                candidates.append(ArtworkCandidate(str(grid.get("id")), external_id, match.get("name") or "",
+                    grid["url"], grid.get("thumb") or grid.get("url"), grid.get("width"), grid.get("height"), score,
+                    grid.get("style"), tuple(grid.get("tags") or ())))
+                if len(candidates) >= limit: return candidates
+        return candidates
     def download_cover(self, cover: CoverResult) -> tuple[bytes, str]:
         response = self.http.request(cover.url)
         return response.body, response.content_type
