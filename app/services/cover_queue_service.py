@@ -33,7 +33,10 @@ class CoverQueueService:
                     self.db.set_artwork_result(row["id"], "matched", str(path), self.artwork.provider.name, artwork_id); stats["covered"] += 1
                     if old_path and old_path != str(path) and not self.db.cover_path_is_shared(old_path, row["id"]):
                         self.artwork.remove(old_path)
-                else: self.db.set_artwork_result(row["id"], "ambiguous"); stats["ambiguous"] += 1
+                else:
+                    status = getattr(self.artwork.provider, "last_search_status", "ambiguous")
+                    self.db.set_artwork_result(row["id"], status)
+                    if status == "ambiguous": stats["ambiguous"] += 1
             except Exception:
                 LOGGER.exception("Artwork download failed game_id=%s", row["id"])
                 self.db.set_artwork_result(row["id"], "failed"); stats["failed"] += 1
