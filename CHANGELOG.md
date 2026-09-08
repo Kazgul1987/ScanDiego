@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.2 – 2026-09-08
+
+- Fixed duplicate MetadataWorker signal connections.
+- Improved manual SteamGridDB artwork selection for ambiguous game matches.
+- Cover selection now includes artwork from multiple plausible SteamGridDB game results.
+- Added fair candidate distribution and global candidate limits.
+- Added provider-level regression coverage for ambiguous multi-game artwork searches.
+- Fixed README version information.
+
 ## 0.10.1 – 2026-09-08
 
 - Added manual SteamGridDB cover selection for ambiguous artwork matches.
