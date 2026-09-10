@@ -13,6 +13,7 @@ from app.models.drive import DriveInfo
 from app.models.game_entry import MediaEntry
 from app.models.scan import ScanStatus
 from app.services.platform_detection_service import PlatformDetectionService
+from app.services.media_validation_service import MediaValidationService
 from app.services.title_normalization_service import TitleNormalizationService
 from app.services.content_detection_service import ContentDetectionService
 from app.utils.date_utils import now_iso, ts_to_iso
@@ -36,7 +37,7 @@ class ScannerWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        started = time.monotonic(); processed = found = warnings = 0
+        started = time.monotonic(); processed = found = warnings = ignored_non_media = 0
         archive_only_dirs: list[str] = []; db: DatabaseManager | None = None
         overall_status = ScanStatus.COMPLETED
         try:
@@ -58,7 +59,8 @@ class ScannerWorker(QObject):
                             self.progress.emit(str(current), processed, found, warnings, time.monotonic()-started, ScanStatus.RUNNING)
                             has_media = has_archive = False
                             try:
-                                iterator = current.iterdir()
+                                children = list(current.iterdir())
+                                iterator = iter(children)
                                 for child in iterator:
                                     if self._cancelled: break
                                     try:
@@ -67,13 +69,19 @@ class ScannerWorker(QObject):
                                         processed += 1; drive_processed += 1
                                         suffix = child.suffix.lower()
                                         if suffix in SUPPORTED_MEDIA_EXTENSIONS:
+                                            platform = self._platforms.detect(child)
+                                            validation = MediaValidationService.classify(
+                                                child, root, platform, children)
+                                            if not validation.is_media:
+                                                ignored_non_media += 1
+                                                continue
                                             has_media = True; stat = child.stat(); timestamp = now_iso()
                                             content = self._content.detect(child)
                                             library_title = self._titles.normalize(content.title or child.name)
                                             batch.append(MediaEntry(None, category, library_title, child.name,
                                                 str(child.resolve()), child.name, suffix, stat.st_size, ts_to_iso(stat.st_mtime),
                                                 drive.letter, drive.label, drive.volume_serial, timestamp, timestamp, 0,
-                                                str(self._platforms.detect(child)), content_type=content.content_type,
+                                                str(platform), content_type=content.content_type,
                                                 content_title=content.title, content_version=content.version,
                                                 content_id=content.content_id, base_content_id=content.base_content_id,
                                                 content_detection_method=content.method,
@@ -120,6 +128,7 @@ class ScannerWorker(QObject):
             self.finished.emit({"status": str(overall_status), "cancelled": self._cancelled,
                 "processed": processed, "found": found, "errors": warnings,
                 "warnings": warnings, "elapsed": time.monotonic()-started,
+                "ignored_non_media": ignored_non_media,
                 "archive_only_dirs": archive_only_dirs})
         except Exception as exc:
             LOGGER.exception("Scan abgebrochen durch Fehler")

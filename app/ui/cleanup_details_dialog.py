@@ -16,6 +16,7 @@ from app.utils.formatting import human_size
 ASSIGNABLE_CATEGORIES = {
     "DLC ohne Hauptspiel", "Update ohne Hauptspiel", "Unsichere Content-Zuordnung",
 }
+INVALID_MEDIA_CATEGORY = "Wahrscheinlich falsch erkannte Medien"
 
 
 class ManualParentDialog(QDialog):
@@ -82,6 +83,7 @@ class CleanupDetailsDialog(QDialog):
             rows = [dict(item) for item in findings]
             self.rows = rows
             preferred = [name for name in ("title", "platform", "file_name", "full_path", "folder_path",
+                         "reason",
                          "content_type", "possible_base_title", "current_game", "suggested_parent_game",
                          "content_detection_confidence", "content_detection_method", "extension", "file_size",
                          "drive_id", "metadata_status", "last_seen")
@@ -94,6 +96,7 @@ class CleanupDetailsDialog(QDialog):
         table.setModel(model)
         table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QTableView.SelectionMode.ExtendedSelection)
         table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(table)
         if db is not None and category in ASSIGNABLE_CATEGORIES:
@@ -103,6 +106,13 @@ class CleanupDetailsDialog(QDialog):
             remove.clicked.connect(self._remove_parent)
             layout.addWidget(assign)
             layout.addWidget(remove)
+        if db is not None and category == INVALID_MEDIA_CATEGORY:
+            remove = QPushButton("Ausgewählte aus ScanDiego entfernen", self)
+            recheck = QPushButton("Neu prüfen", self)
+            remove.clicked.connect(self._remove_invalid_media)
+            recheck.clicked.connect(self.accept)
+            layout.addWidget(remove)
+            layout.addWidget(recheck)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=self)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -129,4 +139,13 @@ class CleanupDetailsDialog(QDialog):
             QMessageBox.information(self, "Zuordnung entfernen", "Bitte zuerst eine Datei auswählen.")
             return
         self.db.remove_manual_content_parent(finding["media_file_id"])
+        self.accept()
+
+    def _remove_invalid_media(self) -> None:
+        indexes = self.table.selectionModel().selectedRows()
+        ids = [self.rows[index.row()]["media_file_id"] for index in indexes]
+        if not ids:
+            QMessageBox.information(self, "Aus ScanDiego entfernen", "Bitte zuerst mindestens eine Datei auswählen.")
+            return
+        self.db.remove_misclassified_media(ids)
         self.accept()
