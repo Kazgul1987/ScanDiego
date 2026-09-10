@@ -79,6 +79,7 @@ def test_every_cleanup_count_uses_its_detail_analysis(tmp_path):
         "Spiele ohne Cover", "Unvollständige Metadaten",
         "DLC ohne Hauptspiel", "Update ohne Hauptspiel", "Unbekannter Content-Typ",
         "Mehrere Base-Game-Dateien", "Unsichere Content-Zuordnung", "Manuell zu prüfen",
+        "Wahrscheinlich falsch erkannte Medien",
     }
     assert all(count == len(db.cleanup_details(category)) for category, count in counts.items())
     # The default means no provider was requested, not that metadata retrieval failed.

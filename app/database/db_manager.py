@@ -15,6 +15,8 @@ from app.services.content_association_service import ContentAssociationService
 from app.models.scan import ScanStatus
 from app.models.metadata import ExternalGame, ExternalPlatform, MetadataStatus
 from app.services.duplicate_detection_service import DuplicateDetectionService, DuplicateGroup, DuplicateStatus
+from app.services.media_validation_service import MediaValidationService
+from app.services.platform_detection_service import PlatformDetectionService
 from app.utils.date_utils import now_iso
 
 LOGGER = logging.getLogger(__name__)
@@ -370,6 +372,8 @@ class DatabaseManager:
         }
         if category in duplicate_categories:
             return self.duplicate_groups(duplicate_categories[category])
+        if category == "Wahrscheinlich falsch erkannte Medien":
+            return self._invalid_media_findings()
         queries = {
             "Archive noch nicht entpackt": "SELECT * FROM archive_only_dirs WHERE is_active=1 ORDER BY folder_path",
             "Fehlende Dateien": "SELECT * FROM media_entries WHERE is_missing=1 ORDER BY title",
@@ -390,6 +394,58 @@ class DatabaseManager:
         }
         return list(self._conn.execute(queries[category]).fetchall())
 
+    def _invalid_media_findings(self) -> list[dict[str, Any]]:
+        """Dynamically revalidate existing rows; no schema state can become stale."""
+        rows = self._conn.execute("""SELECT mf.id AS media_file_id,mf.game_id,mf.full_path,
+            mf.file_name,mf.extension,g.title,g.platform FROM media_files mf
+            JOIN games g ON g.id=mf.game_id ORDER BY g.title,mf.file_name""").fetchall()
+        platforms = PlatformDetectionService()
+        sibling_cache: dict[str, list[Path]] = {}
+        findings: list[dict[str, Any]] = []
+        for source in rows:
+            row = dict(source)
+            path = Path(row["full_path"])
+            parent = str(path.parent)
+            if parent not in sibling_cache:
+                try:
+                    sibling_cache[parent] = list(path.parent.iterdir())
+                except (OSError, ValueError):
+                    sibling_cache[parent] = []
+            detected = row["platform"] or str(platforms.detect(row["full_path"]))
+            validation = MediaValidationService.classify(
+                row["full_path"], detected_platform=detected,
+                sibling_files=sibling_cache[parent])
+            if not validation.is_media and validation.confidence >= .85:
+                row["reason"] = validation.reason
+                findings.append(row)
+        return findings
+
+    def remove_misclassified_media(self, media_file_ids: Iterable[int]) -> int:
+        """Remove only catalogue records, then safely prune genuinely orphaned games."""
+        ids = sorted({int(value) for value in media_file_ids})
+        if not ids:
+            return 0
+        placeholders = ",".join("?" for _ in ids)
+        with self._conn:
+            rows = self._conn.execute(
+                f"SELECT id,game_id FROM media_files WHERE id IN ({placeholders})", ids).fetchall()
+            existing_ids = [row["id"] for row in rows]
+            game_ids = sorted({row["game_id"] for row in rows})
+            if not existing_ids:
+                return 0
+            existing_marks = ",".join("?" for _ in existing_ids)
+            self._conn.execute(
+                f"DELETE FROM media_entries WHERE media_file_id IN ({existing_marks})", existing_ids)
+            self._conn.execute(f"DELETE FROM media_files WHERE id IN ({existing_marks})", existing_ids)
+            for game_id in game_ids:
+                has_media = self._conn.execute(
+                    "SELECT 1 FROM media_files WHERE game_id=?", (game_id,)).fetchone()
+                is_parent = self._conn.execute(
+                    "SELECT 1 FROM media_files WHERE content_parent_game_id=?", (game_id,)).fetchone()
+                if not has_media and not is_parent:
+                    self._conn.execute("DELETE FROM games WHERE id=?", (game_id,))
+        return len(existing_ids)
+
     @staticmethod
     def _content_cleanup_query(predicate: str) -> str:
         return f"""SELECT mf.id AS media_file_id,mf.file_name,g.platform,mf.content_type,mf.content_title AS possible_base_title,
@@ -398,7 +454,7 @@ class DatabaseManager:
             LEFT JOIN games pg ON pg.id=mf.content_parent_game_id WHERE {predicate} ORDER BY mf.file_name"""
 
     def cleanup_counts(self) -> dict[str, int]:
-        categories = ("Archive noch nicht entpackt", "Mögliche Dubletten", "Wahrscheinliche Dubletten",
+        categories = ("Wahrscheinlich falsch erkannte Medien", "Archive noch nicht entpackt", "Mögliche Dubletten", "Wahrscheinliche Dubletten",
                       "Bestätigte Dubletten", "Fehlende Dateien", "Unbekannte Plattformen",
                       "Unbekannte Dateiformate", "Metadaten fehlgeschlagen", "Match prüfen",
                       "Spiele ohne Cover", "Unvollständige Metadaten", "DLC ohne Hauptspiel",

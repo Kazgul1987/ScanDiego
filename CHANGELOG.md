@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.4 – 2026-09-10
+
+- Added context-aware media validation for ambiguous file extensions.
+- Reduced false-positive `.bin`, `.cso` and `.md` detections.
+- Added CUE/BIN companion handling.
+- Added filtering for emulator caches, BIOS files, shaders and internal PC game data.
+- Added filtering for Switch cartridge metadata `.bin` files.
+- Added filtering for PS3 `EBOOT.BIN` internal files.
+- Added cleanup support for previously misclassified media entries.
+- Added regression coverage based on real ScanDiego CSV false positives.
+
 ## 0.10.3 – 2026-09-08
 
 - Fixed a crash after manually applying a selected cover.
