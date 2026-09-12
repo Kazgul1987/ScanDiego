@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
 from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFormLayout,
-                               QLabel, QLineEdit, QMessageBox, QPushButton,
+                               QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
                                QTableView, QVBoxLayout)
 
 from app.models.content import MediaContentType
@@ -82,17 +84,35 @@ class CleanupDetailsDialog(QDialog):
         else:
             rows = [dict(item) for item in findings]
             self.rows = rows
-            preferred = [name for name in ("title", "platform", "file_name", "full_path", "folder_path",
-                         "reason",
+            invalid = category == INVALID_MEDIA_CATEGORY
+            preferred = [name for name in (("selected", "title", "platform", "file_name", "reason",
+                         "confidence", "safety_level", "full_path") if invalid else
+                         ("title", "platform", "file_name", "full_path", "folder_path", "reason",
                          "content_type", "possible_base_title", "current_game", "suggested_parent_game",
                          "content_detection_confidence", "content_detection_method", "extension", "file_size",
-                         "drive_id", "metadata_status", "last_seen")
-                         if rows and name in rows[0]]
-            model.setHorizontalHeaderLabels(preferred or ["Ergebnis"])
+                         "drive_id", "metadata_status", "last_seen"))
+                         if name == "selected" or (rows and name in rows[0])]
+            labels = {"selected": "Auswahl", "title": "Spiel", "platform": "Plattform",
+                      "file_name": "Datei", "reason": "Grund", "confidence": "Confidence",
+                      "safety_level": "Bewertung", "full_path": "Pfad"}
+            model.setHorizontalHeaderLabels([labels.get(name, name) for name in preferred] or ["Ergebnis"])
             for row in rows:
-                model.appendRow([QStandardItem(human_size(row[name]) if name == "file_size"
-                                                else str(row[name] if row[name] is not None else ""))
-                                 for name in preferred])
+                items = []
+                for name in preferred:
+                    if name == "selected":
+                        item = QStandardItem()
+                        item.setCheckable(True)
+                        item.setCheckState(Qt.CheckState.Unchecked)
+                    else:
+                        value = row[name]
+                        if name == "file_size": value = human_size(value)
+                        if name == "confidence": value = f"{float(value):.0%}"
+                        if name == "safety_level":
+                            value = {"safe": "Sicher", "likely": "Sehr wahrscheinlich",
+                                     "review": "Prüfen"}.get(value, value)
+                        item = QStandardItem(str(value if value is not None else ""))
+                    items.append(item)
+                model.appendRow(items)
         table.setModel(model)
         table.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
         table.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
@@ -107,8 +127,18 @@ class CleanupDetailsDialog(QDialog):
             layout.addWidget(assign)
             layout.addWidget(remove)
         if db is not None and category == INVALID_MEDIA_CATEGORY:
+            controls = QHBoxLayout()
+            for label, level in (("Alle auswählen", None), ("Alle sicheren auswählen", "safe")):
+                button = QPushButton(label, self)
+                button.clicked.connect(lambda _checked=False, value=level: self._check_rows(value))
+                controls.addWidget(button)
+            clear = QPushButton("Auswahl aufheben", self)
+            clear.clicked.connect(lambda: self._check_rows("none"))
+            controls.addWidget(clear)
+            layout.addLayout(controls)
             remove = QPushButton("Ausgewählte aus ScanDiego entfernen", self)
             recheck = QPushButton("Neu prüfen", self)
+            self.remove_invalid_button = remove
             remove.clicked.connect(self._remove_invalid_media)
             recheck.clicked.connect(self.accept)
             layout.addWidget(remove)
@@ -142,10 +172,30 @@ class CleanupDetailsDialog(QDialog):
         self.accept()
 
     def _remove_invalid_media(self) -> None:
-        indexes = self.table.selectionModel().selectedRows()
-        ids = [self.rows[index.row()]["media_file_id"] for index in indexes]
+        ids = [row["media_file_id"] for index, row in enumerate(self.rows)
+               if self.table.model().item(index, 0).checkState() == Qt.CheckState.Checked]
         if not ids:
-            QMessageBox.information(self, "Aus ScanDiego entfernen", "Bitte zuerst mindestens eine Datei auswählen.")
+            QMessageBox.information(self, "Aus ScanDiego entfernen", "Keine Einträge ausgewählt.")
+            return
+        selected = [row for row in self.rows if row["media_file_id"] in set(ids)]
+        groups = Counter(row["reason"] for row in selected)
+        details = "\n".join(f"{count:>6}  {reason}" for reason, count in groups.most_common())
+        message = (f"{len(ids):,} Einträge werden aus ScanDiego entfernt.\n\nDavon:\n{details}\n\n"
+                   "Es werden nur Einträge aus der ScanDiego-Datenbank entfernt.\n"
+                   "Die Originaldateien auf den Laufwerken bleiben unverändert.")
+        if QMessageBox.question(self, "Entfernung bestätigen", message,
+                QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes,
+                QMessageBox.StandardButton.Cancel) != QMessageBox.StandardButton.Yes:
             return
         self.db.remove_misclassified_media(ids)
         self.accept()
+
+    def _check_rows(self, level: str | None) -> None:
+        """Checkbox selection is explicit; review rows are never selected by safe actions."""
+        model = self.table.model()
+        for index, row in enumerate(self.rows):
+            checked = level is None or row.get("safety_level") == level
+            if level == "none":
+                checked = False
+            model.item(index, 0).setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)

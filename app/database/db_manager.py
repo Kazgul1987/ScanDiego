@@ -15,9 +15,9 @@ from app.services.content_association_service import ContentAssociationService
 from app.models.scan import ScanStatus
 from app.models.metadata import ExternalGame, ExternalPlatform, MetadataStatus
 from app.services.duplicate_detection_service import DuplicateDetectionService, DuplicateGroup, DuplicateStatus
-from app.services.media_validation_service import MediaValidationService
-from app.services.platform_detection_service import PlatformDetectionService
+from app.services.misclassified_media_service import classify_candidate
 from app.utils.date_utils import now_iso
+from app.utils.paths import get_covers_dir
 
 LOGGER = logging.getLogger(__name__)
 SCHEMA_VERSION = 8
@@ -399,7 +399,6 @@ class DatabaseManager:
         rows = self._conn.execute("""SELECT mf.id AS media_file_id,mf.game_id,mf.full_path,
             mf.file_name,mf.extension,g.title,g.platform FROM media_files mf
             JOIN games g ON g.id=mf.game_id ORDER BY g.title,mf.file_name""").fetchall()
-        platforms = PlatformDetectionService()
         sibling_cache: dict[str, list[Path]] = {}
         findings: list[dict[str, Any]] = []
         for source in rows:
@@ -411,13 +410,9 @@ class DatabaseManager:
                     sibling_cache[parent] = list(path.parent.iterdir())
                 except (OSError, ValueError):
                     sibling_cache[parent] = []
-            detected = row["platform"] or str(platforms.detect(row["full_path"]))
-            validation = MediaValidationService.classify(
-                row["full_path"], detected_platform=detected,
-                sibling_files=sibling_cache[parent])
-            if not validation.is_media and validation.confidence >= .85:
-                row["reason"] = validation.reason
-                findings.append(row)
+            candidate = classify_candidate(row, sibling_cache[parent])
+            if candidate is not None:
+                findings.append(candidate.as_dict())
         return findings
 
     def remove_misclassified_media(self, media_file_ids: Iterable[int]) -> int:
@@ -426,6 +421,7 @@ class DatabaseManager:
         if not ids:
             return 0
         placeholders = ",".join("?" for _ in ids)
+        unused_covers: list[Path] = []
         with self._conn:
             rows = self._conn.execute(
                 f"SELECT id,game_id FROM media_files WHERE id IN ({placeholders})", ids).fetchall()
@@ -443,7 +439,24 @@ class DatabaseManager:
                 is_parent = self._conn.execute(
                     "SELECT 1 FROM media_files WHERE content_parent_game_id=?", (game_id,)).fetchone()
                 if not has_media and not is_parent:
+                    game = self._conn.execute(
+                        "SELECT cover_path FROM games WHERE id=?", (game_id,)).fetchone()
+                    if game and game["cover_path"] and not self.cover_path_is_shared(game["cover_path"], game_id):
+                        cover = Path(game["cover_path"])
+                        try:
+                            cover.resolve().relative_to(get_covers_dir().resolve())
+                        except (OSError, ValueError):
+                            pass
+                        else:
+                            unused_covers.append(cover)
                     self._conn.execute("DELETE FROM games WHERE id=?", (game_id,))
+        # Filesystem work happens only after the database transaction succeeded.
+        # This is the sole exception to cleanup's strict database-only policy.
+        for cover in unused_covers:
+            try:
+                cover.unlink(missing_ok=True)
+            except OSError:
+                LOGGER.warning("Verwaistes Cache-Cover konnte nicht entfernt werden: %s", cover)
         return len(existing_ids)
 
     @staticmethod
