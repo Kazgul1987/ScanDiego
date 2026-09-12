@@ -29,7 +29,7 @@ class Platform(StrEnum):
     NINTENDO_DS = "Nintendo DS"
     NINTENDO_3DS = "Nintendo 3DS"
     MEGA_DRIVE = "Sega Mega Drive / Genesis"
+    SEGA_CD = "Sega CD"
     SATURN = "Sega Saturn"
     DREAMCAST = "Sega Dreamcast"
     UNKNOWN = "Unknown"
-

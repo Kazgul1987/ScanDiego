@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.5 – 2026-09-10
+
+- Fixed overly aggressive filtering of ambiguous game media.
+- Strong ROM/platform context now overrides weak generic folder names such as bin, data, content and resources.
+- Media validation now uses paths relative to the configured scan root.
+- Preserved hard exclusions for BIOS, emulator caches, shaders, Switch cartridge metadata and PS3 internal files.
+- Improved PSP/PS2 CSO validation in explicit platform folders.
+- Added regression coverage for legitimate BIN images stored in BIN/Data/Content subfolders.
+
 ## 0.10.4 – 2026-09-10
 
 - Added context-aware media validation for ambiguous file extensions.

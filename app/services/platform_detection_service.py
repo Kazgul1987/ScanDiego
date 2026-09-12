@@ -32,6 +32,7 @@ class PlatformDetectionService:
         Platform.SNES: ("snes", "super nintendo", "super famicom"),
         Platform.NES: ("nes", "nintendo entertainment system", "famicom"),
         Platform.MEGA_DRIVE: ("mega drive", "megadrive", "genesis"),
+        Platform.SEGA_CD: ("sega cd", "segacd", "mega cd", "megacd"),
         Platform.SATURN: ("saturn", "sega saturn"),
         Platform.DREAMCAST: ("dreamcast", "sega dreamcast"),
         Platform.PC: ("pc", "windows", "win", "pc games", "windows games"),
@@ -49,16 +50,31 @@ class PlatformDetectionService:
     }
 
     def detect(self, path: str | PurePath) -> Platform:
+        contextual = self.detect_context(path)
+        if contextual != Platform.UNKNOWN:
+            return contextual
+        raw = str(path)
+        suffix = PureWindowsPath(raw).suffix.lower()
+        return self._extensions.get(suffix, Platform.UNKNOWN)
+
+    def detect_context(self, path: str | PurePath, max_directory_depth: int | None = None) -> Platform:
+        """Detect an explicit platform folder, without inferring from the extension.
+
+        ``max_directory_depth`` is relative to the supplied path and lets callers
+        distinguish collection folders near a scan root from deeply nested data.
+        """
         raw = str(path)
         parts = PureWindowsPath(raw).parts if "\\" in raw else PurePath(raw).parts
-        for part in reversed(parts[:-1]):
+        directories = parts[:-1]
+        if max_directory_depth is not None:
+            directories = directories[:max_directory_depth]
+        for part in reversed(directories):
             normalized = re.sub(r"[-_.]+", " ", part).strip().casefold()
             compact = normalized.replace(" ", "")
             for platform, aliases in self._aliases.items():
                 if any(normalized == alias or compact == alias.replace(" ", "") for alias in aliases):
                     return platform
-        suffix = PureWindowsPath(raw).suffix.lower()
-        return self._extensions.get(suffix, Platform.UNKNOWN)
+        return Platform.UNKNOWN
 
     @staticmethod
     def normalize_external(name: str) -> str:
