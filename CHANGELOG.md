@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.10.6 – 2026-09-12
+
+- Improved cleanup for previously misclassified media.
+- Cleanup now uses the same scan-root-aware media validation as the scanner.
+- Added safety levels for safe, likely and review-only false positives.
+- Added checkbox-based bulk selection and "select all safe" support.
+- Added deletion preview with grouped false-positive reasons.
+- Added transactional bulk removal from the ScanDiego database.
+- Original game files are never deleted.
+- Improved orphan game and related queue cleanup.
+- Added safe cleanup of unused ScanDiego cover-cache files.
+- Added regression tests for historical false-positive cleanup.
+
 ## 0.10.5 – 2026-09-10
 
 - Fixed overly aggressive filtering of ambiguous game media.
