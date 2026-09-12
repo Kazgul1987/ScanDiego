@@ -8,6 +8,7 @@ from typing import Iterable
 
 from app.config import SUPPORTED_MEDIA_EXTENSIONS
 from app.models.platform import Platform
+from app.services.platform_detection_service import PlatformDetectionService
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,16 +33,18 @@ class MediaValidationService:
         ".chd", ".rvz", ".wbfs", ".wia", ".gcz",
     })
     AMBIGUOUS_EXTENSIONS = frozenset({".bin", ".cso", ".md", ".img", ".iso"})
-    _internal_segments = frozenset({
-        "lipsynch", "shadercache", "shaders", "cache", "sys", "system", "bios",
-        "firmware", "backup", "temp", "tmp", "resources", "resource", "logs",
+    _strong_negative_segments = frozenset({
+        "shadercache", "shaders", "cache", "firmware", "bios", "sys", "system",
+    })
+    _weak_negative_segments = frozenset({
+        "lipsynch", "backup", "temp", "tmp", "resources", "resource", "logs",
         "log", "crash", "dumps", "profiles",
         "bin", "binaries", "data", "content", "engine", "localization", "movies",
     })
     _emulators = ("ryujinx", "cemu", "dolphin", "drastic")
     _disc_platforms = frozenset({
         Platform.PLAYSTATION, Platform.PLAYSTATION_2, Platform.PSP,
-        Platform.SATURN, Platform.DREAMCAST,
+        Platform.SEGA_CD, Platform.SATURN, Platform.DREAMCAST,
     })
 
     @classmethod
@@ -51,9 +54,9 @@ class MediaValidationService:
         raw = str(path)
         pure = PureWindowsPath(raw) if "\\" in raw else PurePath(raw)
         extension, name = pure.suffix.casefold(), pure.name.casefold()
-        platform = cls._platform(detected_platform)
-        segments = [re.sub(r"[-_.]+", " ", part).strip().casefold()
-                    for part in pure.parts[:-1]]
+        relative = cls._relative_path(pure, scan_root)
+        segments = [cls._normalize_segment(part) for part in relative.parts[:-1]]
+        platform = cls._context_platform(relative, scan_root, detected_platform)
 
         def result(accepted: bool, confidence: float, reason: str, **kwargs) -> MediaValidationResult:
             value = MediaValidationResult(accepted, confidence, reason,
@@ -84,17 +87,20 @@ class MediaValidationService:
             if cue:
                 return result(False, 1.0, "rejected_cue_companion_bin",
                               companion_file=cue, excluded_by_rule="cue_primary")
-            if cls._has_emulator(segments) and cls._has_internal_segment(segments):
+            if cls._has_strong_negative_segment(segments):
+                reason = "rejected_emulator_cache" if cls._has_emulator(segments) else "rejected_internal_binary"
+                return result(False, .99, reason, excluded_by_rule="strong_system_path")
+            if cls._has_emulator(segments) and cls._has_weak_negative_segment(segments):
                 return result(False, .99, "rejected_emulator_cache", excluded_by_rule="emulator_internal_path")
-            if cls._has_internal_segment(segments):
-                return result(False, .98, "rejected_pc_game_internal_binary", excluded_by_rule="internal_path")
             if platform in cls._disc_platforms:
                 return result(True, .9, "accepted_platform_context", media_kind="disc_image")
+            if cls._has_weak_negative_segment(segments):
+                return result(False, .98, "rejected_pc_game_internal_binary", excluded_by_rule="internal_path")
             return result(False, .85, "ambiguous_insufficient_context")
 
         if extension == ".cso":
             if (name.endswith(("vertex.cso", "fragment.cso", "pixel.cso", "geometry.cso", "compute.cso"))
-                    or "shader" in name or any(x in segments for x in ("shaders", "rendering", "graphics", "resources"))):
+                    or "shader" in name or cls._has_strong_negative_segment(segments)):
                 return result(False, 1.0, "rejected_shader_cso", excluded_by_rule="shader")
             if platform in {Platform.PSP, Platform.PLAYSTATION_2}:
                 return result(True, .95, "accepted_platform_context", media_kind="compressed_iso")
@@ -130,8 +136,42 @@ class MediaValidationService:
         return any(any(segment.startswith(name) for name in cls._emulators) for segment in segments)
 
     @classmethod
-    def _has_internal_segment(cls, segments: list[str]) -> bool:
-        return any(segment.replace(" ", "") in cls._internal_segments for segment in segments)
+    def _has_strong_negative_segment(cls, segments: list[str]) -> bool:
+        return any(segment.replace(" ", "") in cls._strong_negative_segments for segment in segments)
+
+    @classmethod
+    def _has_weak_negative_segment(cls, segments: list[str]) -> bool:
+        return any(segment.replace(" ", "") in cls._weak_negative_segments for segment in segments)
+
+    @staticmethod
+    def _normalize_segment(value: str) -> str:
+        return re.sub(r"[-_.]+", " ", value).strip().casefold()
+
+    @classmethod
+    def _context_platform(cls, relative: PurePath, scan_root: str | Path | None,
+                          detected_platform: str | Platform | None) -> Platform | None:
+        # Explicit platform collection folders near the root are authoritative.
+        contextual = PlatformDetectionService().detect_context(relative, max_directory_depth=2)
+        if contextual != Platform.UNKNOWN:
+            return contextual
+        # Without a configured root, preserve compatibility for callers that have
+        # already performed central platform detection.
+        if scan_root is None:
+            return cls._platform(detected_platform)
+        return None
+
+    @staticmethod
+    def _relative_path(path: PurePath, scan_root: str | Path | None) -> PurePath:
+        if scan_root is None:
+            return path
+        raw_root = str(scan_root)
+        root = PureWindowsPath(raw_root) if "\\" in raw_root else PurePath(raw_root)
+        try:
+            return path.relative_to(root)
+        except ValueError:
+            # A mismatched root must not lend unrelated absolute parent folders
+            # platform authority.
+            return PureWindowsPath(path.name) if isinstance(path, PureWindowsPath) else PurePath(path.name)
 
     @staticmethod
     def _referencing_cue(path: str | Path, sibling_files: Iterable[str | Path] | None) -> str | None:
